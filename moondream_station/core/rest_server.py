@@ -75,11 +75,142 @@ class RestServer:
                 stats["requests_processed"] = 0
             return stats
 
+        @self.app.post("/v1/chat/completions")
+        async def chat_completions(request: Request):
+            return await self._handle_chat_completion(request)
+
         @self.app.api_route(
             "/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH"]
         )
         async def dynamic_route(request: Request, path: str):
             return await self._handle_dynamic_request(request, path)
+
+    async def _handle_chat_completion(self, request: Request):
+        if not self.inference_service.is_running():
+            raise HTTPException(status_code=503, detail="Inference service not running")
+
+        try:
+            body = await request.json()
+            messages = body.get("messages", [])
+            stream = body.get("stream", False)
+            model = body.get("model", self.config.get("current_model"))
+
+            if not messages:
+                raise HTTPException(status_code=400, detail="Messages required")
+
+            # Extract last user message
+            last_user_msg = None
+            for msg in reversed(messages):
+                if msg.get("role") == "user":
+                    last_user_msg = msg
+                    break
+
+            if not last_user_msg:
+                raise HTTPException(status_code=400, detail="No user message found")
+
+            content = last_user_msg.get("content", "")
+            
+            # Parse content for text and image
+            prompt_text = ""
+            image_url = None
+
+            if isinstance(content, str):
+                prompt_text = content
+            elif isinstance(content, list):
+                for item in content:
+                    if item.get("type") == "text":
+                        prompt_text += item.get("text", "")
+                    elif item.get("type") == "image_url":
+                        image_url = item.get("image_url", {}).get("url")
+
+            # Determine function to call
+            function_name = "caption"
+            kwargs = {"stream": stream}
+
+            if image_url:
+                kwargs["image_url"] = image_url
+                if prompt_text and prompt_text.lower().strip() not in ["describe this", "caption this", ""]:
+                    function_name = "query"
+                    kwargs["question"] = prompt_text
+                else:
+                    # Generic prompt or no prompt -> caption
+                    function_name = "caption"
+            else:
+                # Text only - not supported by VLM usually, but maybe query without image?
+                # For now, error or try query
+                raise HTTPException(status_code=400, detail="Image required for Moondream")
+
+            # Execute
+            start_time = time.time()
+            result = await self.inference_service.execute_function(
+                function_name, None, **kwargs
+            )
+
+            # Handle Streaming
+            if stream:
+                return StreamingResponse(
+                    self._sse_chat_generator(result, model), 
+                    media_type="text/event-stream"
+                )
+
+            # Handle Standard Response
+            response_text = ""
+            if isinstance(result, dict):
+                if "caption" in result:
+                    response_text = result["caption"]
+                elif "answer" in result:
+                    response_text = result["answer"]
+                else:
+                    # Fallback to JSON string
+                    response_text = json.dumps(result)
+            else:
+                response_text = str(result)
+
+            return {
+                "id": f"chatcmpl-{int(time.time())}",
+                "object": "chat.completion",
+                "created": int(time.time()),
+                "model": model,
+                "choices": [{
+                    "index": 0,
+                    "message": {
+                        "role": "assistant",
+                        "content": response_text
+                    },
+                    "finish_reason": "stop"
+                }],
+                "usage": {
+                    "prompt_tokens": 0,
+                    "completion_tokens": len(response_text.split()),
+                    "total_tokens": len(response_text.split())
+                }
+            }
+
+        except Exception as e:
+            if self.analytics:
+                self.analytics.track_error(type(e).__name__, str(e), "api_chat_completions")
+            raise HTTPException(status_code=500, detail=str(e))
+
+    def _sse_chat_generator(self, raw_generator, model):
+        """Convert generator to OpenAI-compatible SSE format"""
+        yield f"data: {json.dumps({'id': f'chatcmpl-{int(time.time())}', 'object': 'chat.completion.chunk', 'created': int(time.time()), 'model': model, 'choices': [{'index': 0, 'delta': {'role': 'assistant', 'content': ''}, 'finish_reason': None}]})}\n\n"
+        
+        for token in raw_generator:
+            chunk = {
+                "id": f"chatcmpl-{int(time.time())}",
+                "object": "chat.completion.chunk",
+                "created": int(time.time()),
+                "model": model,
+                "choices": [{
+                    "index": 0,
+                    "delta": {"content": token},
+                    "finish_reason": None
+                }]
+            }
+            yield f"data: {json.dumps(chunk)}\n\n"
+
+        yield f"data: {json.dumps({'id': f'chatcmpl-{int(time.time())}', 'object': 'chat.completion.chunk', 'created': int(time.time()), 'model': model, 'choices': [{'index': 0, 'delta': {}, 'finish_reason': 'stop'}]})}\n\n"
+        yield "data: [DONE]\n\n"
 
     async def _handle_dynamic_request(self, request: Request, path: str):
         if not self.inference_service.is_running():
@@ -165,11 +296,18 @@ class RestServer:
 
     def _extract_function_name(self, path: str) -> str:
         path_parts = [p for p in path.split("/") if p]
+        name = "index"
+        
         if path_parts and path_parts[0] == "v1" and len(path_parts) > 1:
-            return path_parts[1]
+            name = path_parts[1]
         elif path_parts:
-            return path_parts[-1]
-        return "index"
+            name = path_parts[-1]
+            
+        # Alias mapping
+        if name == "answer":
+            return "query"
+            
+        return name
 
     async def _extract_request_data(self, request: Request) -> Dict[str, Any]:
         kwargs = {}

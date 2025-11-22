@@ -1,0 +1,74 @@
+{
+    "version": "1.0.0",
+    "moondream_station_info": {
+        "latest_version": "0.1.0"
+    },
+    "analytics": {
+        "posthog_project_key": "phc_xZh1mW08olxqBXC2rzVgwHhkQDkuFZvxHVttPIfm1Wo",
+        "posthog_host": "https://us.i.posthog.com"
+    },
+    "models": {
+        "moondream-3-preview": {
+            "name": "Moondream 3 Preview",
+            "description": "Our largest and most powerful model.",
+            "backend": "moondream_backend",
+            "args": {
+                "model_id": "moondream/moondream3-preview"
+            },
+            "system_requirements": {
+                "RAM": "32GB minimum",
+                "GPU": "CUDA GPU",
+                "Storage": "20GB available"
+            },
+            "is_default": true,
+            "supported_os": [
+                "windows",
+                "linux"
+            ]
+        },
+        "moondream-2": {
+            "name": "Moondream 2 Latest",
+            "description": "Great for bulk tasks.",
+            "backend": "moondream_backend",
+            "args": {
+                "model_id": "vikhyatk/moondream2"
+            },
+            "system_requirements": {
+                "RAM": "8GB minimum",
+                "Storage": "5GB available"
+            },
+            "is_default": true,
+            "supported_os": [
+                "windows",
+                "linux",
+                "darwin"
+            ]
+        }
+    },
+    "backends": {
+        "moondream_backend": {
+            "name": "Moondream Backend (Full)",
+            "download_url": "https://moondream-server-assets-dev.s3.us-west-2.amazonaws.com/mds_backend_0.tar.gz",
+            "entry_module": "backend",
+            "functions": [
+                "caption",
+                "query",
+                "detect",
+                "point"
+            ],
+            "version": "1.0.0",
+            "min_version": "0.1.0"
+        }
+    },
+    "messages": {
+        "welcome": "Welcome to Moondream Station, our local inference engine.\nhttps://docs.moondream.ai"
+    },
+    "manual_url": "https://m87-md-prod-assets.s3.us-west-2.amazonaws.com/station/mds2/MANUAL.md",
+    "version_messages": [
+        {
+            "version": "<0.0.1",
+            "severity": "warning",
+            "message": "Your version has critical bugs that were fixed in 0.1.0. Please update immediately."
+        }
+    ]
+}

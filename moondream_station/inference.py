@@ -378,11 +378,12 @@ class InferenceHandler:
         """Parse inference arguments"""
         kwargs = {}
 
+        # First argument handling (backward compatibility)
         if args:
             image_path = args[0]
             expanded_path = Path(image_path).expanduser()
-            if expanded_path.exists():
-                kwargs["image_url"] = self._encode_image(str(expanded_path))
+            if expanded_path.exists() and expanded_path.is_file():
+                kwargs["image_url"] = self._encode_file(str(expanded_path))
             else:
                 kwargs["image_url"] = image_path
 
@@ -394,26 +395,57 @@ class InferenceHandler:
                     kwargs["length"] = length
             elif len(remaining_args) == 1:
                 arg = remaining_args[0]
-                if arg.startswith('"') and arg.endswith('"'):
+                expanded_arg = Path(arg).expanduser()
+                
+                if expanded_arg.exists() and expanded_arg.is_file():
+                    # If it's a file, encode it
+                    encoded_file = self._encode_file(str(expanded_arg))
+                    kwargs["question"] = encoded_file
+                    kwargs["object"] = encoded_file
+                elif arg.startswith('"') and arg.endswith('"'):
                     kwargs["question"] = arg[1:-1]
                     kwargs["object"] = arg[1:-1]
                 else:
                     kwargs["question"] = arg
                     kwargs["object"] = arg
             else:
-                text = " ".join(remaining_args)
+                # Check if any remaining args are files
+                processed_args = []
+                for arg in remaining_args:
+                    expanded_arg = Path(arg).expanduser()
+                    if expanded_arg.exists() and expanded_arg.is_file():
+                        processed_args.append(self._encode_file(str(expanded_arg)))
+                    else:
+                        processed_args.append(arg)
+                
+                text = " ".join(processed_args)
                 kwargs["question"] = text
                 kwargs["object"] = text
 
         return kwargs
 
-    def _encode_image(self, image_path: str) -> str:
-        """Encode image to base64 data URL"""
+    def _encode_file(self, file_path: str) -> str:
+        """Encode file to base64 data URL with MIME type detection"""
+        import mimetypes
+        
         try:
-            with open(image_path, "rb") as f:
-                image_data = f.read()
+            mime_type, _ = mimetypes.guess_type(file_path)
+            if not mime_type:
+                # Fallback for common types if mimetypes fails
+                ext = Path(file_path).suffix.lower()
+                if ext in ['.png']:
+                    mime_type = 'image/png'
+                elif ext in ['.jpg', '.jpeg']:
+                    mime_type = 'image/jpeg'
+                elif ext in ['.webp']:
+                    mime_type = 'image/webp'
+                else:
+                    mime_type = 'application/octet-stream'
 
-            encoded = base64.b64encode(image_data).decode()
-            return f"data:image/png;base64,{encoded}"
+            with open(file_path, "rb") as f:
+                file_data = f.read()
+
+            encoded = base64.b64encode(file_data).decode()
+            return f"data:{mime_type};base64,{encoded}"
         except Exception as e:
-            raise ValueError(f"Failed to encode image: {e}")
+            raise ValueError(f"Failed to encode file {file_path}: {e}")
