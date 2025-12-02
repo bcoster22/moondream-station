@@ -7,6 +7,7 @@ from threading import Thread
 from typing import Any, Dict
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.middleware.cors import CORSMiddleware
 
 from .inference_service import InferenceService
 
@@ -19,6 +20,13 @@ class RestServer:
         self.analytics = analytics
         self.inference_service = InferenceService(config, manifest_manager)
         self.app = FastAPI(title="Moondream Station Inference Server", version="1.0.0")
+        self.app.add_middleware(
+            CORSMiddleware,
+            allow_origins=["*"],
+            allow_credentials=True,
+            allow_methods=["*"],
+            allow_headers=["*"],
+        )
         self.server = None
         self.server_thread = None
         self._setup_routes()
@@ -52,18 +60,23 @@ class RestServer:
 
         @self.app.get("/v1/models")
         async def list_models():
-            models = self.manifest_manager.get_models()
-            return {
-                "models": [
-                    {
-                        "id": model_id,
-                        "name": model_info.name,
-                        "description": model_info.description,
-                        "version": model_info.version,
-                    }
-                    for model_id, model_info in models.items()
-                ]
-            }
+            try:
+                models = self.manifest_manager.get_models()
+                return {
+                    "models": [
+                        {
+                            "id": model_id,
+                            "name": model_info.name,
+                            "description": model_info.description,
+                            "version": getattr(model_info, "version", "unknown"),
+                        }
+                        for model_id, model_info in models.items()
+                    ]
+                }
+            except Exception as e:
+                import traceback
+                traceback.print_exc()
+                raise HTTPException(status_code=500, detail=str(e))
 
         @self.app.get("/v1/stats")
         async def get_stats():
@@ -74,6 +87,23 @@ class RestServer:
             else:
                 stats["requests_processed"] = 0
             return stats
+
+        @self.app.post("/v1/models/switch")
+        async def switch_model(request: Request):
+            body = await request.json()
+            model_id = body.get("model")
+            if not model_id:
+                raise HTTPException(status_code=400, detail="model is required")
+            
+            if model_id not in self.manifest_manager.get_models():
+                raise HTTPException(status_code=404, detail="Model not found")
+                
+            success = self.inference_service.start(model_id)
+            if success:
+                self.config.set("current_model", model_id)
+                return {"status": "success", "model": model_id}
+            else:
+                raise HTTPException(status_code=500, detail="Failed to switch model")
 
         @self.app.post("/v1/chat/completions")
         async def chat_completions(request: Request):
@@ -93,7 +123,22 @@ class RestServer:
             body = await request.json()
             messages = body.get("messages", [])
             stream = body.get("stream", False)
-            model = body.get("model", self.config.get("current_model"))
+            requested_model = body.get("model")
+            current_model = self.config.get("current_model")
+
+            # Auto-switch model if requested and different
+            if requested_model and requested_model != current_model:
+                if requested_model in self.manifest_manager.get_models():
+                    print(f"Auto-switching to requested model: {requested_model}")
+                    if self.inference_service.start(requested_model):
+                        self.config.set("current_model", requested_model)
+                        current_model = requested_model
+                    else:
+                        raise HTTPException(status_code=500, detail=f"Failed to switch to model {requested_model}")
+                else:
+                    raise HTTPException(status_code=404, detail=f"Model {requested_model} not found")
+
+            model = current_model
 
             if not messages:
                 raise HTTPException(status_code=400, detail="Messages required")
@@ -218,6 +263,21 @@ class RestServer:
 
         function_name = self._extract_function_name(path)
         kwargs = await self._extract_request_data(request)
+
+        # Auto-switch model if requested and different
+        requested_model = kwargs.get("model")
+        current_model = self.config.get("current_model")
+
+        if requested_model and requested_model != current_model:
+            if requested_model in self.manifest_manager.get_models():
+                print(f"Auto-switching to requested model: {requested_model}")
+                if self.inference_service.start(requested_model):
+                    self.config.set("current_model", requested_model)
+                    current_model = requested_model
+                else:
+                    raise HTTPException(status_code=500, detail=f"Failed to switch to model {requested_model}")
+            else:
+                raise HTTPException(status_code=404, detail=f"Model {requested_model} not found")
 
         timeout = kwargs.pop("timeout", None)
         if timeout:
@@ -351,7 +411,7 @@ class RestServer:
                 self.app,
                 host=host,
                 port=port,
-                log_level="critical",  # Suppress more logs
+                log_level="info",  # Suppress more logs
                 access_log=False,
             )
             self.server = uvicorn.Server(config)
