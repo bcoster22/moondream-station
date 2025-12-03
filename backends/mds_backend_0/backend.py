@@ -34,8 +34,15 @@ class ModelService:
         self.revision = revision
         self.device = self._get_best_device()
 
+        # Optimization: Use float16 for CUDA to save memory
+        torch_dtype = torch.float16 if self.device == "cuda" else torch.float32
+
         self.model = AutoModelForCausalLM.from_pretrained(
-            model_name, revision=revision, trust_remote_code=True
+            model_name, 
+            revision=revision, 
+            trust_remote_code=True,
+            torch_dtype=torch_dtype,
+            low_cpu_mem_usage=True
         )
 
         if torch.cuda.is_available():
