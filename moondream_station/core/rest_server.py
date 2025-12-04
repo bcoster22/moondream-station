@@ -2,6 +2,95 @@ import asyncio
 import json
 import time
 import uvicorn
+import psutil
+import torch
+try:
+    import pynvml
+except ImportError:
+    pynvml = None
+
+class HardwareMonitor:
+    def __init__(self):
+        self.nvidia_available = False
+        if pynvml:
+            try:
+                pynvml.nvmlInit()
+                self.nvidia_available = True
+            except Exception:
+                pass
+
+    def get_environment_status(self):
+        import os
+        
+        # Detect execution type
+        execution_type = "System"
+        if os.path.exists("/.dockerenv"):
+            execution_type = "Docker"
+        elif os.environ.get("VIRTUAL_ENV"):
+            execution_type = "Venv"
+
+        status = {
+            "platform": "CPU",
+            "accelerator_available": False,
+            "torch_version": torch.__version__,
+            "cuda_version": getattr(torch.version, 'cuda', 'Unknown'),
+            "hip_version": getattr(torch.version, 'hip', None),
+            "execution_type": execution_type
+        }
+        
+        if torch.cuda.is_available():
+            status["platform"] = "CUDA"
+            status["accelerator_available"] = True
+        elif hasattr(torch.version, 'hip') and torch.version.hip:
+            status["platform"] = "ROCm"
+            status["accelerator_available"] = True
+        elif hasattr(torch, 'xpu') and torch.xpu.is_available():
+             status["platform"] = "XPU"
+             status["accelerator_available"] = True
+        elif self.nvidia_available:
+            # Fallback: Driver is working, but Torch might not see it
+            status["platform"] = "NVIDIA Driver"
+            status["accelerator_available"] = True
+            try:
+                driver = pynvml.nvmlSystemGetDriverVersion()
+                if isinstance(driver, bytes):
+                    driver = driver.decode()
+                status["cuda_version"] = f"Driver {driver}"
+            except:
+                pass
+        
+        return status
+
+    def get_gpus(self):
+        gpus = []
+        if self.nvidia_available:
+            try:
+                device_count = pynvml.nvmlDeviceGetCount()
+                for i in range(device_count):
+                    handle = pynvml.nvmlDeviceGetHandleByIndex(i)
+                    name = pynvml.nvmlDeviceGetName(handle)
+                    if isinstance(name, bytes):
+                        name = name.decode("utf-8")
+                    
+                    memory = pynvml.nvmlDeviceGetMemoryInfo(handle)
+                    utilization = pynvml.nvmlDeviceGetUtilizationRates(handle)
+                    temp = pynvml.nvmlDeviceGetTemperature(handle, pynvml.NVML_TEMPERATURE_GPU)
+                    
+                    gpus.append({
+                        "id": i,
+                        "name": name,
+                        "load": utilization.gpu,
+                        "memory_used": int(memory.used / 1024 / 1024), # MB
+                        "memory_total": int(memory.total / 1024 / 1024), # MB
+                        "temperature": temp,
+                        "type": "NVIDIA"
+                    })
+            except Exception as e:
+                print(f"Nvidia monitoring error: {e}")
+        return gpus
+
+# Global monitor instance
+hw_monitor = HardwareMonitor()
 
 from threading import Thread
 from typing import Any, Dict
@@ -14,6 +103,7 @@ from .inference_service import InferenceService
 
 class RestServer:
     def __init__(self, config, manifest_manager, session_state=None, analytics=None):
+        # ... (init code remains same)
         self.config = config
         self.manifest_manager = manifest_manager
         self.session_state = session_state
@@ -32,7 +122,7 @@ class RestServer:
         self._setup_routes()
 
     def _sse_event_generator(self, raw_generator):
-        """Convert generator tokens to Server-Sent Events format with token counting"""
+        # ... (remains same)
         token_count = 0
         start_time = time.time()
 
@@ -57,6 +147,79 @@ class RestServer:
         @self.app.get("/health")
         async def health():
             return {"status": "ok", "server": "moondream-station"}
+
+        @self.app.get("/metrics")
+        async def metrics():
+            """Return system metrics for monitoring"""
+            try:
+                cpu = psutil.cpu_percent(interval=None)
+                memory = psutil.virtual_memory().percent
+                gpus = hw_monitor.get_gpus()
+                env = hw_monitor.get_environment_status()
+                
+                # Determine primary device
+                device = "CPU"
+                if gpus:
+                    device = gpus[0]["name"]
+                
+                return {
+                    "cpu": cpu,
+                    "memory": memory,
+                    "device": device,
+                    "gpus": gpus,
+                    "environment": env
+                }
+            except Exception as e:
+                print(f"Error collecting metrics: {e}")
+                return {"cpu": 0, "memory": 0, "device": "Unknown", "gpus": []}
+
+        @self.app.post("/v1/system/gpu-reset")
+        async def reset_gpu(gpu_id: int = 0):
+            """
+            Reset the specified GPU.
+            Requires passwordless sudo for nvidia-smi.
+            """
+            import subprocess
+            
+            try:
+                # Check if nvidia-smi is available and we have permission
+                # -n: non-interactive (fails if password needed)
+                cmd = ["sudo", "-n", "nvidia-smi", "--gpu-reset", "-i", str(gpu_id)]
+                
+                process = subprocess.run(
+                    cmd, 
+                    capture_output=True, 
+                    text=True,
+                    timeout=30
+                )
+                
+                if process.returncode == 0:
+                    return {"status": "success", "message": f"GPU {gpu_id} reset successfully."}
+                
+                # Handle permission denied (sudo failed)
+                if "password is required" in process.stderr:
+                    from fastapi import HTTPException
+                    raise HTTPException(
+                        status_code=403, 
+                        detail="Permission denied. Passwordless sudo not configured for nvidia-smi."
+                    )
+                
+                # Handle other errors (e.g. GPU busy)
+                from fastapi import HTTPException
+                raise HTTPException(
+                    status_code=500, 
+                    detail=f"Reset failed: {process.stderr.strip()}"
+                )
+                
+            except subprocess.TimeoutExpired:
+                from fastapi import HTTPException
+                raise HTTPException(status_code=504, detail="Command timed out.")
+            except Exception as e:
+                # Re-raise HTTP exceptions
+                if hasattr(e, "status_code"):
+                    raise e
+                from fastapi import HTTPException
+                raise HTTPException(status_code=500, detail=str(e))
 
         @self.app.get("/v1/models")
         async def list_models():
@@ -428,7 +591,7 @@ class RestServer:
     def _run_server(self):
         try:
             asyncio.run(self.server.serve())
-        except Exception:
+        except (Exception, asyncio.CancelledError):
             # Suppress normal shutdown errors
             pass
 
@@ -439,8 +602,8 @@ class RestServer:
             self.server.should_exit = True
 
             # Force shutdown the server
-            if hasattr(self.server, "force_exit"):
-                self.server.force_exit = True
+            # if hasattr(self.server, "force_exit"):
+            #     self.server.force_exit = True
 
         # Wait for server thread to finish
         if self.server_thread and self.server_thread.is_alive():
