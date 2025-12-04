@@ -184,7 +184,9 @@ class RestServer:
             try:
                 # Check if nvidia-smi is available and we have permission
                 # -n: non-interactive (fails if password needed)
-                cmd = ["sudo", "-n", "nvidia-smi", "--gpu-reset", "-i", str(gpu_id)]
+                # Use the new nuclear reset script
+                script_path = "/home/bcoster/.moondream-station/moondream-station/nuclear_gpu_reset.sh"
+                cmd = ["sudo", "-n", script_path]
                 
                 process = subprocess.run(
                     cmd, 
