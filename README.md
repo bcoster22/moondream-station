@@ -124,3 +124,17 @@ The utility functions provide insight into what Moondream Station is currently d
 - `reset` - Reset app data & settings
 - `clear` - Clear screen
 - `exit` - Quit application
+### GPU Recovery
+If you encounter "GPU has fallen off the bus" (Xid 79) errors, Moondream Station includes a "Nuclear GPU Reset" utility.
+
+1. **Setup**: Run the setup script to configure passwordless sudo:
+   ```bash
+   ./setup_gpu_reset.sh
+   ```
+
+2. **Usage**: You can trigger the reset via the API:
+   ```bash
+   curl -X POST http://localhost:2021/v1/system/gpu-reset
+   ```
+   
+   **Warning**: This will kill processes using the GPU, unload drivers, and restart your display manager.

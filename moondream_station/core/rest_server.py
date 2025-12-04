@@ -210,7 +210,7 @@ class RestServer:
                 from fastapi import HTTPException
                 raise HTTPException(
                     status_code=500, 
-                    detail=f"Reset failed: {process.stderr.strip()}"
+                    detail=f"Reset failed. Stderr: {process.stderr.strip()}. Stdout: {process.stdout.strip()}"
                 )
                 
             except subprocess.TimeoutExpired:
