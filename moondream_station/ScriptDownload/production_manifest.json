@@ -43,6 +43,23 @@
                 "linux",
                 "darwin"
             ]
+        },
+        "nsfw-detector": {
+            "name": "NSFW Detector",
+            "description": "Checks for NSFW content.",
+            "backend": "nsfw_backend",
+            "args": {
+                "model_id": "Marqo/nsfw-image-detection-384"
+            },
+            "system_requirements": {
+                "RAM": "2GB minimum"
+            },
+            "is_default": false,
+            "supported_os": [
+                "windows",
+                "linux",
+                "darwin"
+            ]
         }
     },
     "backends": {
@@ -55,6 +72,17 @@
                 "query",
                 "detect",
                 "point"
+            ],
+            "version": "1.0.0",
+            "min_version": "0.1.0"
+        },
+        "nsfw_backend": {
+            "name": "NSFW Backend",
+            "download_url": "",
+            "entry_module": "backend",
+            "functions": [
+                "classify",
+                "detect"
             ],
             "version": "1.0.0",
             "min_version": "0.1.0"
