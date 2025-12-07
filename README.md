@@ -40,6 +40,12 @@
 </tr>
 </table>
 
+## Features
+- **Visual Reasoning**: Caption images, answer questions, and detect objects.
+- **NSFW Detection**: Securely identify inappropriate content on-device.
+- **GPU Recovery**: Advanced tools to reset NVIDIA GPUs after driver crashes.
+- **Cross-Platform**: Runs on Linux and Windows (WSL recommended).
+
 ## Installation
 
 Install from PyPI:
