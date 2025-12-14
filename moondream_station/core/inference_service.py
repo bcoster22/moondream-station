@@ -17,6 +17,20 @@ class InferenceService:
         self.current_model = None
         self.worker_backends = []
 
+    def cleanup_memory(self):
+        """Force GC and CUDA cache clear to remove initialization artifacts."""
+        import gc
+        import torch
+        gc.collect()
+        try:
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                mem = torch.cuda.memory_allocated() / 1024 / 1024
+                # Using print for safety
+                print(f"[InferenceService] Post-Load Cleanup Complete. Active VRAM: {mem:.2f} MB")
+        except:
+            pass
+
     def start(self, model_id: str):
         n_workers = int(self.config.get("inference_workers", N_WORKERS))
         max_queue_size = int(
@@ -36,6 +50,9 @@ class InferenceService:
 
         if not self.worker_backends:
             return False
+
+        # --- POST-LOAD CLEANUP ---
+        self.cleanup_memory()
 
         self.worker_pool = SimpleWorkerPool(n_workers, max_queue_size, timeout)
         return True
@@ -102,6 +119,23 @@ class InferenceService:
         
         self.manifest_manager.unload_all_backends()
         self.current_model = None
+        
+        # --- BEST PRACTICE CLEANUP ---
+        import gc
+        import torch
+        
+        # Force Python Garbage Collection
+        gc.collect()
+        
+        # Force CUDA Cache Clear
+        try:
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                start_mem = torch.cuda.memory_allocated()
+                print(f"[InferenceService] Unload complete. CUDA Mem: {start_mem}")
+        except:
+            pass
+            
         return True
 
     def is_running(self) -> bool:
