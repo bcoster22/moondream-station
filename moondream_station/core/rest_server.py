@@ -109,6 +109,132 @@ class HardwareMonitor:
 # Global monitor instance
 hw_monitor = HardwareMonitor()
 
+class ModelMemoryTracker:
+    """Track memory usage per loaded model"""
+    def __init__(self):
+        self.loaded_models = {}  # model_id -> {name, vram_mb, ram_mb, loaded_at}
+        self.last_known_vram = {}  # model_id -> vram_mb (persists after unload)
+        self.base_vram = 0
+        self.base_ram = 0
+        
+    def record_baseline(self):
+        """Record baseline memory before any models loaded"""
+        try:
+            # Use nvidia-smi to get ACTUAL VRAM usage (includes X Windows, etc.)
+            if pynvml:
+                try:
+                    handle = pynvml.nvmlDeviceGetHandleByIndex(0)
+                    memory = pynvml.nvmlDeviceGetMemoryInfo(handle)
+                    # Baseline = Total - Free (what's currently used by system)
+                    self.base_vram = (memory.total - memory.free) / (1024 * 1024)  # MB
+                    print(f"Baseline VRAM: {self.base_vram:.0f}MB (system + X Windows)")
+                except Exception as e:
+                    print(f"Failed to get baseline VRAM via pynvml: {e}")
+                    # Fallback to torch
+                    if torch.cuda.is_available():
+                        self.base_vram = torch.cuda.memory_allocated(0) / (1024 * 1024)
+            elif torch.cuda.is_available():
+                self.base_vram = torch.cuda.memory_allocated(0) / (1024 * 1024)
+                
+            self.base_ram = psutil.Process().memory_info().rss / (1024 * 1024)  # MB
+        except Exception as e:
+            print(f"Failed to record baseline: {e}")
+    
+    def track_model_load(self, model_id: str, model_name: str):
+        """Track a model being loaded"""
+        import time
+        try:
+            vram_mb = 0
+            ram_mb = 0
+            
+            # Use nvidia-smi for ACTUAL VRAM usage
+            if pynvml:
+                try:
+                    handle = pynvml.nvmlDeviceGetHandleByIndex(0)
+                    memory = pynvml.nvmlDeviceGetMemoryInfo(handle)
+                    # Current usage = Total - Free
+                    current_vram = (memory.total - memory.free) / (1024 * 1024)
+                    # Model VRAM = Current - Baseline
+                    vram_mb = current_vram - self.base_vram
+                    print(f"VRAM: Total={memory.total/1024/1024:.0f}MB, Free={memory.free/1024/1024:.0f}MB, Used={current_vram:.0f}MB, Baseline={self.base_vram:.0f}MB, Model={vram_mb:.0f}MB")
+                except Exception as e:
+                    print(f"Failed to get VRAM via pynvml: {e}")
+                    # Fallback to torch
+                    if torch.cuda.is_available():
+                        vram_mb = (torch.cuda.memory_allocated(0) / (1024 * 1024)) - self.base_vram
+            elif torch.cuda.is_available():
+                vram_mb = (torch.cuda.memory_allocated(0) / (1024 * 1024)) - self.base_vram
+            
+            ram_mb = (psutil.Process().memory_info().rss / (1024 * 1024)) - self.base_ram
+            
+            self.loaded_models[model_id] = {
+                "id": model_id,
+                "name": model_name,
+                "vram_mb": int(vram_mb),
+                "ram_mb": int(ram_mb),
+                "loaded_at": int(time.time())
+            }
+            self.last_known_vram[model_id] = int(vram_mb)
+            print(f"Tracked model load: {model_id} - VRAM: {vram_mb:.0f}MB, RAM: {ram_mb:.0f}MB")
+        except Exception as e:
+            print(f"Failed to track model load: {e}")
+    
+    def track_model_unload(self, model_id: str):
+        """Track a model being unloaded"""
+        if model_id in self.loaded_models:
+            del self.loaded_models[model_id]
+            print(f"Tracked model unload: {model_id}")
+    
+    def update_memory_usage(self):
+        """Update memory usage for all loaded models"""
+        try:
+            if not self.loaded_models:
+                return
+            
+            current_vram = 0
+            current_ram = 0
+            
+            # Use nvidia-smi for ACTUAL VRAM
+            if pynvml:
+                try:
+                    handle = pynvml.nvmlDeviceGetHandleByIndex(0)
+                    memory = pynvml.nvmlDeviceGetMemoryInfo(handle)
+                    current_vram = (memory.total - memory.free) / (1024 * 1024)
+                except:
+                    if torch.cuda.is_available():
+                        current_vram = torch.cuda.memory_allocated(0) / (1024 * 1024)
+            elif torch.cuda.is_available():
+                current_vram = torch.cuda.memory_allocated(0) / (1024 * 1024)
+            
+            current_ram = psutil.Process().memory_info().rss / (1024 * 1024)
+            
+            # Distribute memory across loaded models proportionally
+            num_models = len(self.loaded_models)
+            if num_models > 0:
+                vram_per_model = (current_vram - self.base_vram) / num_models
+                ram_per_model = (current_ram - self.base_ram) / num_models
+                
+                for model_id in self.loaded_models:
+                    self.loaded_models[model_id]["vram_mb"] = int(vram_per_model)
+                    self.loaded_models[model_id]["ram_mb"] = int(ram_per_model)
+                    self.last_known_vram[model_id] = int(vram_per_model)
+        except Exception as e:
+            print(f"Failed to update memory usage: {e}")
+    
+    def get_loaded_models(self):
+        """Get list of loaded models with memory info"""
+        self.update_memory_usage()
+        return list(self.loaded_models.values())
+    
+    def get_last_known_vram(self, model_id: str) -> int:
+        """Get last known VRAM usage for a model (even if unloaded)"""
+        return self.last_known_vram.get(model_id, 0)
+
+# Global tracker instance
+model_memory_tracker = ModelMemoryTracker()
+model_memory_tracker.record_baseline()
+
+
 from threading import Thread
 from typing import Any, Dict
 from fastapi import FastAPI, Request, HTTPException
@@ -179,14 +305,20 @@ class RestServer:
                 if gpus:
                     device = gpus[0]["name"]
                 
+                # Get loaded models with real memory usage
+                loaded_models = model_memory_tracker.get_loaded_models()
+                
                 return {
                     "cpu": cpu,
                     "memory": memory,
                     "device": device,
                     "gpus": gpus,
-                    "environment": env
+                    "environment": env,
+                    "loaded_models": loaded_models
                 }
             except Exception as e:
+                print(f"Error collecting metrics: {e}")
+                return {"cpu": 0, "memory": 0, "device": "Unknown", "gpus": [], "loaded_models": []}
                 print(f"Error collecting metrics: {e}")
                 return {"cpu": 0, "memory": 0, "device": "Unknown", "gpus": []}
 
@@ -407,6 +539,7 @@ class RestServer:
                             "name": model_info.name,
                             "description": model_info.description,
                             "version": getattr(model_info, "version", "unknown"),
+                            "last_known_vram_mb": model_memory_tracker.get_last_known_vram(model_id),
                         }
                         for model_id, model_info in models.items()
                     ]
@@ -438,8 +571,40 @@ class RestServer:
                 
             success = self.inference_service.start(model_id)
             if success:
+                # Capture previous model BEFORE updating config (Critical for unload logic)
+                previous_model = self.config.get("current_model")
+                
                 self.config.set("current_model", model_id)
-                return {"status": "success", "model": model_id}
+                
+                # Unload previous model from tracker
+                try:
+                    if previous_model and previous_model != model_id:
+                        model_memory_tracker.track_model_unload(previous_model)
+                        print(f"Unloaded previous model from tracker: {previous_model}")
+                except Exception as e:
+                    print(f"Warning: Failed to unload previous model: {e}")
+                
+                # Track model load and get stats
+                vram_mb = 0
+                ram_mb = 0
+                try:
+                    model_info = self.manifest_manager.get_models().get(model_id)
+                    if model_info:
+                        model_memory_tracker.track_model_load(model_id, model_info.name)
+                        # Get the stats we just tracked
+                        if model_id in model_memory_tracker.loaded_models:
+                            stats = model_memory_tracker.loaded_models[model_id]
+                            vram_mb = stats.get("vram_mb", 0)
+                            ram_mb = stats.get("ram_mb", 0)
+                except Exception as e:
+                    print(f"Warning: Failed to track model load: {e}")
+                
+                return {
+                    "status": "success", 
+                    "model": model_id,
+                    "vram_mb": vram_mb,
+                    "ram_mb": ram_mb
+                }
             else:
                 raise HTTPException(status_code=500, detail="Failed to switch model")
 
@@ -468,8 +633,23 @@ class RestServer:
             if not self.inference_service.is_running():
                 target_model = requested_model if requested_model else "moondream-2"
                 print(f"DEBUG: Service stopped. Auto-starting {target_model}...")
+                
+                # Check previous for unloading (edge case where service stopped but tracker has state)
+                previous_model = self.config.get("current_model")
+                
                 if self.inference_service.start(target_model):
                      self.config.set("current_model", target_model)
+                     
+                     # TRACKER UPDATE
+                     try:
+                         if previous_model and previous_model != target_model:
+                             model_memory_tracker.track_model_unload(previous_model)
+                         
+                         model_info = self.manifest_manager.get_models().get(target_model)
+                         if model_info:
+                             model_memory_tracker.track_model_load(target_model, model_info.name)
+                     except Exception as e:
+                         print(f"Warning: Failed to track auto-start: {e}")
                 else:
                      raise HTTPException(status_code=500, detail="Failed to start model")
 
@@ -479,9 +659,26 @@ class RestServer:
             if requested_model and requested_model != current_model:
                 if requested_model in self.manifest_manager.get_models():
                     print(f"Auto-switching to requested model: {requested_model}")
+                    
+                    # Capture previous for unload
+                    previous_before_switch = current_model
+                    
                     if self.inference_service.start(requested_model):
                         self.config.set("current_model", requested_model)
                         current_model = requested_model
+                        
+                        # TRACKER UPDATE
+                        try:
+                            if previous_before_switch:
+                                model_memory_tracker.track_model_unload(previous_before_switch)
+                                print(f"[Tracker] Auto-switch unloaded: {previous_before_switch}")
+                                
+                            model_info = self.manifest_manager.get_models().get(requested_model)
+                            if model_info:
+                                model_memory_tracker.track_model_load(requested_model, model_info.name)
+                                print(f"[Tracker] Auto-switch loaded: {requested_model}")
+                        except Exception as e:
+                            print(f"Warning: Failed to track auto-switch: {e}")
                     else:
                         raise HTTPException(status_code=500, detail=f"Failed to switch to model {requested_model}")
                 else:
@@ -674,9 +871,27 @@ class RestServer:
         if requested_model and requested_model != current_model:
             if requested_model in self.manifest_manager.get_models():
                 print(f"Auto-switching to requested model: {requested_model}")
+                # Capture previous model for tracking unloading BEFORE switch
+                previous_model_auto = self.config.get("current_model")
+                
                 if self.inference_service.start(requested_model):
                     self.config.set("current_model", requested_model)
                     current_model = requested_model
+                    
+                    # SYSTEM INTEGRATION: Track model switch in memory tracker
+                    try:
+                        # 1. Unload previous
+                        if previous_model_auto and previous_model_auto != requested_model:
+                            model_memory_tracker.track_model_unload(previous_model_auto)
+                            print(f"[Tracker] Unloaded previous model on auto-switch: {previous_model_auto}")
+                            
+                        # 2. Load new
+                        model_info = self.manifest_manager.get_models().get(requested_model)
+                        if model_info:
+                            model_memory_tracker.track_model_load(requested_model, model_info.name)
+                            print(f"[Tracker] Tracked new model on auto-switch: {requested_model}")
+                    except Exception as e:
+                        print(f"[Tracker] Warning: Failed to track auto-switch: {e}")
                 else:
                     raise HTTPException(status_code=500, detail=f"Failed to switch to model {requested_model}")
             else:
