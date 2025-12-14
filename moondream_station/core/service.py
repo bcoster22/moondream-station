@@ -35,7 +35,11 @@ class ServiceManager:
                 self.rest_server = None
                 return False
 
-        except Exception:
+        except Exception as e:
+            import sys
+            sys.stderr.write(f"DEBUG: EXCEPTION in ServiceManager.start: {e}\n")
+            import traceback
+            traceback.print_exc()
             self.rest_server = None
             return False
 

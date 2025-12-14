@@ -1,9 +1,26 @@
 import asyncio
+import sys
+import os
+# Add gallery project path to find SDXL backend
+if "/home/bcoster/Documents/Github_Projects/Gallery/Image-Gallery-2" not in sys.path:
+    sys.path.append("/home/bcoster/Documents/Github_Projects/Gallery/Image-Gallery-2")
+
+try:
+    import sdxl_backend_new
+except ImportError:
+    print("Warning: Could not import sdxl_backend_new. Gen AI will not work.")
+    sdxl_backend_new = None
+
 import json
 import time
 import uvicorn
 import psutil
 import torch
+import os
+import sys
+import subprocess
+import urllib.request
+from threading import Thread
 try:
     import pynvml
 except ImportError:
@@ -223,6 +240,162 @@ class RestServer:
                 from fastapi import HTTPException
                 raise HTTPException(status_code=500, detail=str(e))
 
+        @self.app.post("/v1/system/unload")
+        async def unload_model():
+            """Force unload the current model from memory"""
+            try:
+                # Unload Moondream
+                if hasattr(self, "inference_service") and self.inference_service:
+                    self.inference_service.unload_model()
+                
+                # Unload SDXL
+                if sdxl_backend_new:
+                     sdxl_backend_new.unload_backend()
+
+                return {"status": "success", "message": "All models unloaded and VRAM cleared"}
+            except Exception as e:
+                import traceback
+                traceback.print_exc()
+                return {"status": "error", "message": str(e)}
+
+        
+        @self.app.get("/v1/system/prime-profile")
+        async def get_prime_profile():
+            """Get the current NVIDIA Prime profile (nvidia/on-demand/intel)"""
+            import subprocess
+            try:
+                # prime-select query does not require sudo
+                process = subprocess.run(
+                    ["prime-select", "query"], 
+                    capture_output=True, 
+                    text=True,
+                    timeout=5
+                )
+                if process.returncode == 0:
+                    return {"profile": process.stdout.strip()}
+                return {"profile": "unknown", "error": process.stderr.strip()}
+            except Exception as e:
+                return {"profile": "unknown", "error": str(e)}
+
+        @self.app.post("/v1/system/prime-profile")
+        async def set_prime_profile(profile: str):
+            """Set the NVIDIA Prime profile (requires sudo/root via script)"""
+            import subprocess
+            from fastapi import HTTPException
+            
+            valid_profiles = ["nvidia", "on-demand", "intel"]
+            if profile not in valid_profiles:
+                raise HTTPException(status_code=400, detail="Invalid profile")
+                
+            try:
+                # Use the script helper
+                script_path = "/home/bcoster/.moondream-station/moondream-station/switch_prime_profile.sh"
+                cmd = ["sudo", "-n", script_path, profile]
+                
+                process = subprocess.run(
+                    cmd, 
+                    capture_output=True, 
+                    text=True,
+                    timeout=30
+                )
+                
+                if process.returncode == 0:
+                    return {"status": "success", "message": f"Switched to {profile}. Please logout/reboot."}
+                
+                if "password is required" in process.stderr:
+                    raise HTTPException(
+                        status_code=403, 
+                        detail="Permission denied. Sudo requires password."
+                    )
+                    
+                raise HTTPException(status_code=500, detail=f"Failed: {process.stderr}")
+                
+            except subprocess.TimeoutExpired:
+                raise HTTPException(status_code=504, detail="Command timed out.")
+            except Exception as e:
+                if hasattr(e, "status_code"): raise e
+                raise HTTPException(status_code=500, detail=str(e))
+
+        @self.app.post("/v1/generate")
+        async def generate_image(request: Request):
+            """
+            Generate generic image using SDXL Backend with Smart VRAM Management
+            """
+            if not sdxl_backend_new:
+                 return JSONResponse(content={"error": "SDXL Backend not available"}, status_code=500)
+
+            # Get VRAM Mode from Header (high, balanced, low)
+            vram_mode = request.headers.get("X-VRAM-Mode", "balanced") 
+
+            try:
+                data = await request.json()
+                prompt = data.get("prompt")
+                if not prompt:
+                     return JSONResponse(content={"error": "Prompt is required"}, status_code=400)
+
+                # Smart Switching: Unload Moondream if needed
+                if vram_mode in ["balanced", "low"]:
+                    if hasattr(self, "inference_service") and self.inference_service.is_running():
+                        print(f"[VRAM] Unloading Moondream for SDXL generation ({vram_mode} mode)...")
+                        self.inference_service.unload_model()
+
+                # Init Backend
+                success = sdxl_backend_new.init_backend(
+                    model_id=data.get("model", "sdxl-realism"),
+                    use_4bit=True
+                )
+                if not success:
+                     return JSONResponse(content={"error": "Failed to initialize SDXL backend"}, status_code=500)
+
+                # Generation Logic with Retry
+                width = data.get("width", 1024)
+                height = data.get("height", 1024)
+                steps = data.get("steps", 8)
+                image = data.get("image") 
+                strength = data.get("strength", 0.75)
+
+                try:
+                    result = sdxl_backend_new.generate(
+                        prompt=prompt,
+                        width=width,
+                        height=height,
+                        steps=steps,
+                        image=image,
+                        strength=strength
+                    )
+                except Exception as gen_err:
+                    if "out of memory" in str(gen_err).lower():
+                        print("[VRAM] OOM detected during generation. Triggering Emergency Unload and Retry...")
+                        self.unload_all_models()
+                        # Retry once
+                        success = sdxl_backend_new.init_backend(
+                            model_id=data.get("model", "sdxl-realism"),
+                            use_4bit=True
+                        )
+                        result = sdxl_backend_new.generate(
+                            prompt=prompt,
+                            width=width,
+                            height=height,
+                            steps=steps,
+                            image=image,
+                            strength=strength
+                        )
+                    else:
+                        raise gen_err
+
+                # Low VRAM Cleanup
+                if vram_mode == "low":
+                    print("[VRAM] Low mode: Unloading SDXL after generation.")
+                    sdxl_backend_new.unload_backend()
+
+                return {"created": int(time.time()), "data": [{"b64_json": img} for img in result], "images": result, "image": result[0] if result else None}
+
+            except Exception as e:
+                import traceback
+                traceback.print_exc()
+                return JSONResponse(content={"error": str(e)}, status_code=500)
+
+
         @self.app.get("/v1/models")
         async def list_models():
             try:
@@ -280,15 +453,26 @@ class RestServer:
         async def dynamic_route(request: Request, path: str):
             return await self._handle_dynamic_request(request, path)
 
+
+
     async def _handle_chat_completion(self, request: Request):
-        if not self.inference_service.is_running():
-            raise HTTPException(status_code=503, detail="Inference service not running")
+        # NOTE: Removed initial is_running check to allow auto-start
 
         try:
             body = await request.json()
             messages = body.get("messages", [])
             stream = body.get("stream", False)
             requested_model = body.get("model")
+            
+            # --- AUTO-START / SWITCH LOGIC ---
+            if not self.inference_service.is_running():
+                target_model = requested_model if requested_model else "moondream-2"
+                print(f"DEBUG: Service stopped. Auto-starting {target_model}...")
+                if self.inference_service.start(target_model):
+                     self.config.set("current_model", target_model)
+                else:
+                     raise HTTPException(status_code=500, detail="Failed to start model")
+
             current_model = self.config.get("current_model")
 
             # Auto-switch model if requested and different
@@ -301,7 +485,9 @@ class RestServer:
                     else:
                         raise HTTPException(status_code=500, detail=f"Failed to switch to model {requested_model}")
                 else:
-                    raise HTTPException(status_code=404, detail=f"Model {requested_model} not found")
+                    # If model not found, we might just continue with current if compatible, 
+                    # but typically we error or fallback.
+                    pass
 
             model = current_model
 
@@ -346,15 +532,51 @@ class RestServer:
                     # Generic prompt or no prompt -> caption
                     function_name = "caption"
             else:
-                # Text only - not supported by VLM usually, but maybe query without image?
-                # For now, error or try query
+                # Text only
                 raise HTTPException(status_code=400, detail="Image required for Moondream")
 
-            # Execute
+            # --- SMART VRAM MANAGEMENT START ---
+            vram_mode = request.headers.get("X-VRAM-Mode", "balanced")
+            if vram_mode in ["balanced", "low"]:
+                # Ensure SDXL is unloaded to free space for Moondream
+                if 'sdxl_backend_new' in sys.modules:
+                    try:
+                        # Only unload if it looks like it might be loaded (backend instance exists)
+                        # But our unload_backend check is safe
+                        print(f"DEBUG: Smart Switching (Mode: {vram_mode}) - Unloading SDXL before analysis...")
+                        sys.modules['sdxl_backend_new'].unload_backend()
+                    except Exception as e:
+                        print(f"WARNING: Failed to unload SDXL: {e}")
+            # --- SMART VRAM MANAGEMENT END ---
+
+            # Execute with OOM Retry
             start_time = time.time()
-            result = await self.inference_service.execute_function(
-                function_name, None, **kwargs
-            )
+            try:
+                result = await self.inference_service.execute_function(
+                    function_name, None, **kwargs
+                )
+            except Exception as e:
+                # Check for OOM
+                error_str = str(e).lower()
+                if "out of memory" in error_str or "cuda" in error_str or "alloc" in error_str:
+                    print(f"CRITICAL: OOM detected during Moondream analysis. Logic: Auto-Recovery. Error: {e}")
+                    
+                    # 1. Unload everything
+                    self.unload_all_models()
+                    
+                    # 2. Restart Moondream Service
+                    print(f"Re-initializing Moondream service for model: {model}")
+                    if self.inference_service.start(model):
+                        print("Service restarted. Retrying operation...")
+                        # 3. Retry execution
+                        result = await self.inference_service.execute_function(
+                            function_name, None, **kwargs
+                        )
+                    else:
+                        raise HTTPException(status_code=500, detail="OOM Recovery failed: Could not restart service.")
+                else:
+                    raise e
+
 
             # Handle Streaming
             if stream:
@@ -399,7 +621,9 @@ class RestServer:
         except Exception as e:
             if self.analytics:
                 self.analytics.track_error(type(e).__name__, str(e), "api_chat_completions")
+            print(f"Error in chat_completions: {e}")
             raise HTTPException(status_code=500, detail=str(e))
+
 
     def _sse_chat_generator(self, raw_generator, model):
         """Convert generator to OpenAI-compatible SSE format"""
@@ -423,6 +647,20 @@ class RestServer:
         yield "data: [DONE]\n\n"
 
     async def _handle_dynamic_request(self, request: Request, path: str):
+        # --- PATCH: System Restart Endpoint ---
+        if "system/restart" in path:
+            print("[System] Received system/restart request.")
+            
+            def _restart_process():
+                print("[System] Restarting server process in 1s...")
+                time.sleep(1)
+                python = sys.executable
+                os.execl(python, python, *sys.argv)
+            
+            Thread(target=_restart_process, daemon=True).start()
+            return JSONResponse({"status": "restarting"})
+        # --------------------------------------
+
         if not self.inference_service.is_running():
             raise HTTPException(status_code=503, detail="Inference service not running")
 
@@ -460,12 +698,99 @@ class RestServer:
                 function_name, timeout, **kwargs
             )
 
+            # --- PATCH: OOM Check for non-raised errors ---
+            if isinstance(result, dict) and result.get("error"):
+                err_msg = str(result["error"])
+                if "CUDA out of memory" in err_msg or "OutOfMemoryError" in err_msg:
+                    # Force raise to trigger the OOM handler in the except block
+                    raise Exception(f"CUDA out of memory: {err_msg}")
+            # ---------------------------------------------
+
             # Record the request in session state
             if self.session_state:
                 self.session_state.record_request(f"/{path}")
 
             success = not (isinstance(result, dict) and result.get("error"))
+
+            # --- PATCH: Auto-Unload Logic ---
+            # Check for header or env var to unload model after inference
+            should_unload = request.headers.get("X-Auto-Unload") == "true" or \
+                            os.environ.get("MOONDREAM_AUTO_UNLOAD") == "true"
+            
+            if should_unload:
+                print(f"[System] Auto-unloading model (Reason: Auto-Unload requested)")
+                # Run unload in a separate thread to avoid blocking the return
+                Thread(target=self.inference_service.unload_model, daemon=True).start()
+            # -------------------------------
         except Exception as e:
+            # --- PATCH: OOM Logging & Auto-Restart ---
+            error_str = str(e)
+            if "CUDA out of memory" in error_str or "OutOfMemoryError" in type(e).__name__:
+                print(f"\n{'='*40}")
+                print(f"CRITICAL ERROR: GPU OOM Detected!")
+                print(f"Error: {error_str}")
+                print(f"{'='*40}\n")
+                
+                gpu_stats = "N/A"
+                mem_stats = "N/A"
+
+                # Run nvidia-smi
+                print("[Diagnostics] Running nvidia-smi...")
+                try:
+                    proc_res = subprocess.run(["nvidia-smi"], capture_output=True, text=True, check=False)
+                    gpu_stats = proc_res.stdout
+                    print(gpu_stats)
+                except Exception as log_err:
+                    print(f"Failed to run nvidia-smi: {log_err}")
+                    gpu_stats = f"Failed: {log_err}"
+
+                # Capture Python process memory
+                try:
+                    process = psutil.Process(os.getpid())
+                    mem_info = process.memory_info()
+                    mem_stats = f"RSS={mem_info.rss / 1024 / 1024:.2f} MB, VMS={mem_info.vms / 1024 / 1024:.2f} MB"
+                    print(f"[Diagnostics] Python Process Memory: {mem_stats}")
+                except Exception as log_err:
+                    print(f"Failed to get process memory: {log_err}")
+                    mem_stats = f"Failed: {log_err}"
+
+                # SEND TO APP LOG SERVER
+                try:
+                    # Extract Task Details
+                    task_info = f"Function: {function_name}\nModel: {kwargs.get('model', 'unknown')}"
+                    if 'prompt' in kwargs:
+                        p = str(kwargs['prompt'])
+                        task_info += f"\nPrompt: {p[:100]}..." if len(p) > 100 else f"\nPrompt: {p}"
+                    if 'width' in kwargs and 'height' in kwargs:
+                        task_info += f"\nResolution: {kwargs.get('width')}x{kwargs.get('height')}"
+                    
+                    log_payload = {
+                        "level": "CRITICAL",
+                        "context": "MoondreamBackend",
+                        "message": f"OOM Crash in {function_name}! Auto-Restart Initiated.",
+                        "stack": f"Error: {error_str}\n\nTask Details:\n{task_info}\n\nGPU Stats:\n{gpu_stats}\n\nProcess Mem: {mem_stats}" 
+                    }
+                    
+                    req = urllib.request.Request(
+                        "http://localhost:3001/log",
+                        data=json.dumps(log_payload).encode('utf-8'),
+                        headers={'Content-Type': 'application/json'}
+                    )
+                    urllib.request.urlopen(req, timeout=2)
+                    print("[Diagnostics] Sent OOM report to App Log Server.")
+                except Exception as log_send_err:
+                    print(f"[Diagnostics] Failed to send log to app server: {log_send_err}")
+
+                print("\n[System] Initiating EMERGENCY RESTART to recover from OOM...")
+                print(f"{'='*40}\n")
+                
+                time.sleep(2)
+                
+                # Re-execute the current process
+                python = sys.executable
+                os.execl(python, python, *sys.argv)
+            # -----------------------------------------
+
             if self.analytics:
                 self.analytics.track_error(
                     type(e).__name__,
@@ -560,6 +885,24 @@ class RestServer:
 
         return kwargs
 
+    def unload_all_models(self):
+        """Unloads both Moondream and SDXL to free maximum VRAM"""
+        print("[System] Emergency Unload Triggered")
+        try:
+            if hasattr(self, "inference_service") and self.inference_service:
+                self.inference_service.unload_model()
+        except: pass
+        
+        try:
+            if sdxl_backend_new:
+                sdxl_backend_new.unload_backend()
+        except: pass
+        
+        torch.cuda.empty_cache()
+        import gc
+        gc.collect()
+
+
     def start(self, host: str = "127.0.0.1", port: int = 2020) -> bool:
         if self.server_thread and self.server_thread.is_alive():
             return False
@@ -622,7 +965,6 @@ class RestServer:
             try:
                 # Run the async stop in a sync context
                 import asyncio
-
                 try:
                     loop = asyncio.get_event_loop()
                     if loop.is_running():

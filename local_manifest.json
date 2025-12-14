@@ -1,110 +1,167 @@
 {
-  "version": "1.0.0",
-  "moondream_station_info": {
-    "latest_version": "0.2.0"
-  },
-  "analytics": {
-    "posthog_project_key": "phc_xZh1mW08olxqBXC2rzVgwHhkQDkuFZvxHVttPIfm1Wo",
-    "posthog_host": "https://us.i.posthog.com"
-  },
-  "models": {
-    "moondream-3-preview": {
-      "name": "Moondream 3 Preview",
-      "description": "Vision-language model for image understanding and analysis",
-      "backend": "moondream_backend",
-      "args": {
-        "model_id": "moondream/moondream3-preview"
-      },
-      "system_requirements": {
-        "RAM": "32GB minimum",
-        "GPU": "CUDA",
-        "Storage": "20GB available"
-      },
-      "is_default": true,
-      "supported_os": [
-        "windows",
-        "linux"
-      ]
+    "version": "1.0.0",
+    "moondream_station_info": {
+        "latest_version": "0.2.0"
     },
-    "moondream-2": {
-      "name": "Moondream 2 Latest",
-      "description": "Vision-language model for image understanding and analysis",
-      "backend": "moondream_backend",
-      "args": {
-        "model_id": "vikhyatk/moondream2"
-      },
-      "system_requirements": {
-        "RAM": "8GB minimum",
-        "Storage": "5GB available"
-      },
-      "is_default": true,
-      "supported_os": [
-        "windows",
-        "linux",
-        "darwin"
-      ]
+    "analytics": {
+        "posthog_project_key": "phc_xZh1mW08olxqBXC2rzVgwHhkQDkuFZvxHVttPIfm1Wo",
+        "posthog_host": "https://us.i.posthog.com"
     },
-    "nsfw-detector": {
-      "name": "NSFW Detector (Marqo)",
-      "description": "NSFW Image Detection using Marqo/nsfw-image-detection-384",
-      "backend": "nsfw_backend",
-      "args": {
-        "model_id": "Marqo/nsfw-image-detection-384"
-      },
-      "system_requirements": {
-        "RAM": "2GB minimum",
-        "GPU": "Optional",
-        "Storage": "1GB available"
-      },
-      "supported_os": [
-        "linux",
-        "windows",
-        "darwin"
-      ]
-    }
-  },
-  "backends": {
-    "moondream_backend": {
-      "name": "Moondream Backend (Full)",
-      "download_url": "backends/mds_backend_0",
-      "entry_module": "backend",
-      "functions": [
-        "caption",
-        "query",
-        "detect",
-        "point"
-      ],
-      "version": "1.0.0",
-      "min_version": "0.1.0"
+    "models": {
+        "moondream-3-preview": {
+            "name": "Moondream 3 Preview",
+            "description": "Vision-language model for image understanding and analysis",
+            "backend": "moondream_backend",
+            "args": {
+                "model_id": "moondream/moondream3-preview"
+            },
+            "system_requirements": {
+                "RAM": "32GB minimum",
+                "GPU": "CUDA",
+                "Storage": "20GB available"
+            },
+            "is_default": true,
+            "supported_os": [
+                "windows",
+                "linux"
+            ]
+        },
+        "moondream-2": {
+            "name": "Moondream 2 Latest",
+            "description": "Vision-language model for image understanding and analysis",
+            "backend": "moondream_backend",
+            "args": {
+                "model_id": "vikhyatk/moondream2"
+            },
+            "system_requirements": {
+                "RAM": "8GB minimum",
+                "Storage": "5GB available"
+            },
+            "is_default": true,
+            "supported_os": [
+                "windows",
+                "linux",
+                "darwin"
+            ]
+        },
+        "sdxl-realism": {
+            "name": "SDXL Realism (Juggernaut)",
+            "description": "Photorealistic images using Juggernaut XL Lightning (4-step)",
+            "backend": "sdxl_backend",
+            "args": {
+                "model_id": "RunDiffusion/Juggernaut-XL-Lightning",
+                "use_4bit": true
+            },
+            "system_requirements": {
+                "RAM": "12GB",
+                "GPU": "CUDA (8GB VRAM)",
+                "Storage": "7GB available"
+            },
+            "supported_os": [
+                "linux"
+            ]
+        },
+        "sdxl-anime": {
+            "name": "SDXL Anime (Animagine)",
+            "description": "High-quality Anime style using Animagine XL 3.1",
+            "backend": "sdxl_backend",
+            "args": {
+                "model_id": "cagliostrolab/animagine-xl-3.1",
+                "use_4bit": true
+            },
+            "system_requirements": {
+                "RAM": "12GB",
+                "GPU": "CUDA (8GB VRAM)",
+                "Storage": "7GB available"
+            },
+            "supported_os": [
+                "linux"
+            ]
+        },
+        "sdxl-surreal": {
+            "name": "SDXL Surreal (DreamShaper)",
+            "description": "Artistic and Surreal style using DreamShaper XL Lightning",
+            "backend": "sdxl_backend",
+            "args": {
+                "model_id": "Lykon/dreamshaper-xl-lightning",
+                "use_4bit": true
+            },
+            "system_requirements": {
+                "RAM": "12GB",
+                "GPU": "CUDA (8GB VRAM)",
+                "Storage": "7GB available"
+            },
+            "supported_os": [
+                "linux"
+            ]
+        },
+        "nsfw-detector": {
+            "name": "NSFW Detector (Marqo)",
+            "description": "NSFW Image Detection using Marqo/nsfw-image-detection-384",
+            "backend": "nsfw_backend",
+            "args": {
+                "model_id": "Marqo/nsfw-image-detection-384"
+            },
+            "system_requirements": {
+                "RAM": "2GB minimum",
+                "GPU": "Optional",
+                "Storage": "1GB available"
+            },
+            "supported_os": [
+                "linux",
+                "windows",
+                "darwin"
+            ]
+        }
     },
-    "nsfw_backend": {
-      "name": "NSFW Detection Backend",
-      "download_url": "/home/bcoster/.moondream-station/backends/nsfw_backend",
-      "entry_module": "backend",
-      "functions": [
-        "classify",
-        "detect"
-      ],
-      "version": "1.0.0",
-      "min_version": "0.1.0"
-    }
-  },
-  "messages": {
-    "welcome": "Welcome to Moondream Station, our local inference engine. This is where I put messages.",
-    "warning": "This is an example warning.",
-    "note": "This backend requires significant compute resources and will download large model files."
-  },
-  "manual_url": "https://raw.githubusercontent.com/moondream-ai/moondream-station/main/MANUAL.md",
-  "version_messages": [
-    {
-      "version": "<0.2.0",
-      "severity": "warning",
-      "message": "Your version has critical bugs that were fixed in 0.2.0. Please update immediately."
+    "backends": {
+        "moondream_backend": {
+            "name": "Moondream Backend (Full)",
+            "download_url": "backends/mds_backend_0",
+            "entry_module": "backend",
+            "functions": [
+                "caption",
+                "query",
+                "detect",
+                "point"
+            ],
+            "version": "1.0.0",
+            "min_version": "0.1.0"
+        },
+        "sdxl_backend": {
+            "name": "SDXL Turbo Backend",
+            "download_url": "/home/bcoster/.moondream-station/moondream-station/backends/sdxl_backend",
+            "entry_module": "backend",
+            "functions": [
+                "generate",
+                "images"
+            ],
+            "version": "1.0.0",
+            "min_version": "0.1.0"
+        },
+        "nsfw_backend": {
+            "name": "NSFW Detection Backend",
+            "download_url": "/home/bcoster/.moondream-station/backends/nsfw_backend",
+            "entry_module": "backend",
+            "functions": [
+                "classify",
+                "detect"
+            ],
+            "version": "1.0.0",
+            "min_version": "0.1.0"
+        }
     },
-    {
-      "version": "==0.1.9",
-      "severity": "note",
-      "message": "This version has known issues with model switching. Consider updating to 0.2.0."
-    }
-  ]
+    "messages": {
+        "welcome": "Welcome to Moondream Station.",
+        "warning": "Ensure you have the latest drivers.",
+        "note": "SDXL models will be downloaded on first use (~7GB each)."
+    },
+    "manual_url": "https://raw.githubusercontent.com/moondream-ai/moondream-station/main/MANUAL.md",
+    "version_messages": [
+        {
+            "version": "<0.2.0",
+            "severity": "warning",
+            "message": "Your version has critical bugs that were fixed in 0.2.0. Please update immediately."
+        }
+    ]
 }

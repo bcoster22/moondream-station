@@ -1,0 +1,5 @@
+#!/bin/bash
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+export PYTHONPATH=$PYTHONPATH:$DIR
+python3 $DIR/start_server.py

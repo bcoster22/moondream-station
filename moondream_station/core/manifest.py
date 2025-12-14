@@ -164,6 +164,7 @@ class ManifestManager:
         return self._manifest.messages
 
     def download_backend(self, backend_id: str) -> bool:
+        sys.stderr.write(f"DEBUG: download_backend called for {backend_id}\n")
         if not self._manifest or backend_id not in self._manifest.backends:
             return False
 
@@ -171,13 +172,17 @@ class ManifestManager:
         backend_dir = self.backends_dir / backend_id
         backend_file = backend_dir / f"{backend_info.entry_module}.py"
         requirements_file = backend_dir / "requirements.txt"
+        
+        sys.stderr.write(f"DEBUG: Checking backend file at {backend_file}\n")
 
         if backend_file.exists():
+            sys.stderr.write("DEBUG: Backend file exists.\n")
             if requirements_file.exists():
                 if not self._install_requirements(str(requirements_file)):
                     return False
             return True
 
+        sys.stderr.write("DEBUG: Backend file missing, attempting download/copy...\n")
         try:
             if backend_info.download_url.startswith(("http://", "https://")):
                 with tempfile.NamedTemporaryFile(suffix=".tar.gz", delete=False) as tmp_file:
@@ -216,8 +221,12 @@ class ManifestManager:
                 if not self._install_requirements(str(requirements_file)):
                     return False
 
+            sys.stderr.write("DEBUG: download_backend SUCCESS\n")
             return True
-        except Exception:
+        except Exception as e:
+            sys.stderr.write(f"DEBUG: EXCEPTION in download_backend: {e}\n")
+            import traceback
+            traceback.print_exc()
             return False
 
     def _install_requirements(self, requirements_url: str) -> bool:
@@ -343,6 +352,7 @@ class ManifestManager:
         backend_path = self.backends_dir / backend_id / f"{backend_info.entry_module}.py"
 
         try:
+            sys.stderr.write(f"DEBUG: load_backend {backend_id} from {backend_path}\n")
             spec = importlib.util.spec_from_file_location(backend_id, backend_path)
             module = importlib.util.module_from_spec(spec)
             sys.modules[backend_id] = module
@@ -350,7 +360,10 @@ class ManifestManager:
 
             self._loaded_backends[backend_id] = module
             return module
-        except Exception:
+        except Exception as e:
+            sys.stderr.write(f"DEBUG: EXCEPTION in load_backend {backend_id}: {e}\n")
+            import traceback
+            traceback.print_exc()
             return None
 
     def get_backend_for_model(self, model_id: str) -> Optional[Any]:
@@ -442,6 +455,45 @@ class ManifestManager:
                     continue
                 return model_id
         return None
+
+    def unload_all_backends(self):
+        self._worker_backends.clear()
+        self._loaded_backends.clear()
+        
+        import sys
+        import gc
+        
+        # Aggressive cleanup of backend modules
+        modules_to_remove = []
+        for mod_name in list(sys.modules.keys()):
+            # Target mds_backend and other known backend patterns
+            if "backend" in mod_name and ("mds_" in mod_name or "moondream" in mod_name or "sdxl" in mod_name):
+                 modules_to_remove.append(mod_name)
+        
+        for mod_name in modules_to_remove:
+            try:
+                if mod_name in sys.modules:
+                    module = sys.modules[mod_name]
+                    if hasattr(module, "unload"):
+                        try:
+                            module.unload()
+                            print(f"DEBUG: Unloaded {mod_name}")
+                        except Exception as e:
+                            print(f"DEBUG: Failed to unload {mod_name}: {e}")
+                
+                del sys.modules[mod_name]
+            except KeyError:
+                pass
+            
+        gc.collect()
+        
+        try:
+            import torch
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                print("DEBUG: torch.cuda.empty_cache() called")
+        except ImportError:
+            pass
 
     def get_version_messages(self, current_version: str) -> List[VersionMessage]:
         if not self._manifest or not self._manifest.version_messages:

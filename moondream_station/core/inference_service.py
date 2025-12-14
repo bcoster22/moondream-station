@@ -54,7 +54,21 @@ class InferenceService:
             return {"error": "Inference service not started"}
 
         backend = self._get_next_backend()
-        if not backend or not hasattr(backend, function_name):
+        if not backend:
+            import sys
+            sys.stderr.write(f"DEBUG: backend is None for '{function_name}'\n")
+            return {"error": f"Function '{function_name}' not available"}
+
+        import sys
+        sys.stderr.write(f"DEBUG: execute_function called for '{function_name}'\n")
+        sys.stderr.write(f"DEBUG: backend object: {backend}\n")
+        if hasattr(backend, "__dir__"):
+             sys.stderr.write(f"DEBUG: backend dir: {dir(backend)}\n")
+        else:
+             sys.stderr.write("DEBUG: backend has no __dir__\n")
+
+        if not hasattr(backend, function_name):
+            sys.stderr.write(f"DEBUG: hasattr failed for '{function_name}'\n")
             return {"error": f"Function '{function_name}' not available"}
 
         func = getattr(backend, function_name)
@@ -80,6 +94,15 @@ class InferenceService:
         stats["model"] = self.current_model
         stats["status"] = "running"
         return stats
+
+    def unload_model(self):
+        if self.worker_pool:
+            self.worker_pool.shutdown()
+            self.worker_pool = None
+        
+        self.manifest_manager.unload_all_backends()
+        self.current_model = None
+        return True
 
     def is_running(self) -> bool:
         return self.worker_pool is not None and self.current_model is not None
