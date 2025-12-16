@@ -1,14 +1,115 @@
 import asyncio
 import sys
 import os
-# Add gallery project path to find SDXL backend
-if "/home/bcoster/Documents/Github_Projects/Gallery/Image-Gallery-2" not in sys.path:
-    sys.path.append("/home/bcoster/Documents/Github_Projects/Gallery/Image-Gallery-2")
-
+# Import SDXL backend from local backends directory
 try:
-    import sdxl_backend_new
-except ImportError:
-    print("Warning: Could not import sdxl_backend_new. Gen AI will not work.")
+    # Add backends directory to path
+    backends_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), 'backends')
+    if backends_dir not in sys.path:
+        sys.path.insert(0, backends_dir)
+    
+    # Import the SDXL backend
+    from sdxl_backend.backend import SDXLBackend
+    
+    # Create a wrapper class that matches the expected interface
+    class SDXLBackendWrapper:
+        def __init__(self):
+            self._instance = None
+            self._current_model = None
+        
+        def init_backend(self, model_id="sdxl-realism", use_4bit=True):
+            """Initialize SDXL backend with specified model"""
+            try:
+                # Map model IDs to HuggingFace paths
+                model_mapping = {
+                    "sdxl-realism": "RunDiffusion/Juggernaut-XL-Lightning",
+                    "sdxl-anime": "cagliostrolab/animagine-xl-3.1",
+                    "sdxl-surreal": "Lykon/dreamshaper-xl-lightning"
+                }
+                hf_model = model_mapping.get(model_id, model_id)
+                
+                # Create or reinitialize if model changed
+                if self._instance is None or self._current_model != hf_model:
+                    config = {
+                        "model_id": hf_model,
+                        "use_4bit": use_4bit,
+                        "compile": False
+                    }
+                    self._instance = SDXLBackend(config)
+                    self._current_model = hf_model
+                
+                # Initialize if not already loaded
+                if self._instance.pipeline is None:
+                    print(f"[SDXL] Initializing backend with model: {hf_model}")
+                    self._instance.initialize()
+                
+                return True
+            except Exception as e:
+                print(f"[SDXL] Error initializing backend: {e}")
+                import traceback
+                traceback.print_exc()
+                return False
+        
+        def generate(self, prompt, width=1024, height=1024, steps=8, image=None, strength=0.75):
+            """Generate image using SDXL backend"""
+            if self._instance is None or self._instance.pipeline is None:
+                raise RuntimeError("SDXL backend not initialized")
+            
+            try:
+                # Call the backend's generate method
+                if hasattr(self._instance, 'generate'):
+                    return self._instance.generate(
+                        prompt=prompt,
+                        width=width,
+                        height=height,
+                        num_inference_steps=steps,
+                        init_image_b64=image,
+                        strength=strength
+                    )
+                else:
+                    # Fallback to direct pipeline call
+                    import base64
+                    import io
+                    from PIL import Image as PILImage
+                    
+                    result = self._instance.pipeline(
+                        prompt=prompt,
+                        width=width,
+                        height=height,
+                        num_inference_steps=steps
+                    ).images
+                    
+                    # Convert to base64
+                    output_images = []
+                    for img in result:
+                        buffer = io.BytesIO()
+                        img.save(buffer, format="PNG")
+                        img_b64 = base64.b64encode(buffer.getvalue()).decode('utf-8')
+                        output_images.append(img_b64)
+                    
+                    return output_images
+            except Exception as e:
+                print(f"[SDXL] Error generating image: {e}")
+                import traceback
+                traceback.print_exc()
+                raise
+        
+        def unload_backend(self):
+            """Unload SDXL backend to free VRAM"""
+            if self._instance is not None:
+                self._instance.pipeline = None
+                import torch
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                print("[SDXL] Backend unloaded and VRAM freed")
+    
+    # Create global instance
+    sdxl_backend_new = SDXLBackendWrapper()
+    print("[SDXL] Backend loaded successfully from local backends directory")
+    
+except ImportError as e:
+    print(f"Warning: Could not import SDXL backend: {e}")
+    print("SDXL generation will not be available.")
     sdxl_backend_new = None
 
 import json

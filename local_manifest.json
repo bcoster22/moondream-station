@@ -112,6 +112,42 @@
                 "windows",
                 "darwin"
             ]
+        },
+        "wd14-vit-v2": {
+            "name": "WD14 ViT Tagger v2",
+            "description": "Best for organizing and tagging images (Anime/Danbooru tags).",
+            "backend": "wd14_backend",
+            "args": {},
+            "system_requirements": {
+                "GPU": "4GB VRAM"
+            },
+            "supported_os": [
+                "linux"
+            ]
+        },
+        "joycaption-alpha-2": {
+            "name": "JoyCaption Alpha 2",
+            "description": "Best for detailed, natural language descriptions.",
+            "backend": "joycaption_backend",
+            "args": {},
+            "system_requirements": {
+                "GPU": "8GB VRAM"
+            },
+            "supported_os": [
+                "linux"
+            ]
+        },
+        "florence-2-large": {
+            "name": "Florence-2 Large",
+            "description": "Microsoft Florence-2. Fast Analysis, OCR, Detection.",
+            "backend": "florence2_backend",
+            "args": {},
+            "system_requirements": {
+                "GPU": "6GB VRAM"
+            },
+            "supported_os": [
+                "linux"
+            ]
         }
     },
     "backends": {
@@ -149,6 +185,37 @@
             ],
             "version": "1.0.0",
             "min_version": "0.1.0"
+        },
+        "wd14_backend": {
+            "name": "WD14 Tagger Backend",
+            "download_url": "/home/bcoster/.moondream-station/backends/wd14_backend",
+            "entry_module": "backend",
+            "functions": [
+                "caption",
+                "query"
+            ],
+            "version": "1.0.0"
+        },
+        "joycaption_backend": {
+            "name": "JoyCaption Backend",
+            "download_url": "/home/bcoster/.moondream-station/backends/joycaption_backend",
+            "entry_module": "backend",
+            "functions": [
+                "caption",
+                "query"
+            ],
+            "version": "1.0.0"
+        },
+        "florence2_backend": {
+            "name": "Florence-2 Backend",
+            "download_url": "/home/bcoster/.moondream-station/backends/florence2_backend",
+            "entry_module": "backend",
+            "functions": [
+                "caption",
+                "query",
+                "detect"
+            ],
+            "version": "1.0.0"
         }
     },
     "messages": {
