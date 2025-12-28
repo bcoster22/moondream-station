@@ -63,27 +63,17 @@ class SDXLBackend:
                 self.logger.warning(f"Could not reload VAE: {e}")
 
             self.pipeline.enable_model_cpu_offload()
-
             self.logger.info("SDXL Model loaded successfully.")
             return True
 
         except Exception as e:
             self.logger.error(f"Failed to initialize SDXL backend: {e}")
-            import traceback
-            traceback.print_exc()
             return False
 
     def get_img2img(self):
         if self.img2img_pipeline:
             return self.img2img_pipeline
-        
-        self.logger.info("Creating Img2Img pipeline from Text2Image...")
-        # AutoPipeline 'from_pipe' shares components (model offload should persist)
-        try:
-            self.img2img_pipeline = AutoPipelineForImage2Image.from_pipe(self.pipeline)
-        except Exception as e:
-            self.logger.error(f"Failed to create img2img pipe: {e}")
-            raise e
+        self.img2img_pipeline = AutoPipelineForImage2Image.from_pipe(self.pipeline)
         return self.img2img_pipeline
 
     def generate_image(self, prompt, negative_prompt="", steps=4, guidance_scale=1.5, width=1024, height=1024, num_images=1, image=None, strength=0.75, **kwargs):
@@ -91,19 +81,29 @@ class SDXLBackend:
             raise RuntimeError("Pipeline not initialized")
             
         try:
-            with torch.inference_mode():
-                if image:
-                    # Img2Img
-                    self.logger.info(f"Generating Img2Img: '{prompt}' (Steps: {steps}, Strength: {strength})")
-                    pipe = self.get_img2img()
-                    
-                    # Clean input
-                    if isinstance(image, str) and "," in image:
-                        image = image.split(",")[1]
-                    
-                    init_image = Image.open(io.BytesIO(base64.b64decode(image))).convert("RGB")
-                    init_image = init_image.resize((int(width), int(height)))
+            # DEBUG SAVE
+            debug_path = "/home/bcoster/moondream_debug_init.png"
+            log_path = "/home/bcoster/moondream_params.txt"
+            
+            if image:
+                if isinstance(image, str) and "," in image:
+                    image = image.split(",")[1]
+                
+                init_image = Image.open(io.BytesIO(base64.b64decode(image))).convert("RGB")
+                init_image = init_image.resize((int(width), int(height)))
+                
+                # Save input to prove what we received
+                init_image.save(debug_path)
+                
+                with open(log_path, "w") as f:
+                    f.write(f"Mode: Img2Img\n")
+                    f.write(f"Prompt: {prompt}\n")
+                    f.write(f"Strength: {strength} (Type: {type(strength)})\n")
+                    f.write(f"Steps: {steps}\n")
+                    f.write(f"Input Saved to: {debug_path}\n")
 
+                with torch.inference_mode():
+                    pipe = self.get_img2img()
                     images = pipe(
                         prompt=prompt,
                         negative_prompt=negative_prompt,
@@ -113,18 +113,15 @@ class SDXLBackend:
                         guidance_scale=float(guidance_scale),
                         num_images_per_prompt=int(num_images)
                     ).images
-                else:
-                    # Text2Image
-                    self.logger.info(f"Generating Text2Image: '{prompt}'")
-                    images = self.pipeline(
-                        prompt=prompt,
-                        negative_prompt=negative_prompt,
-                        num_inference_steps=int(steps),
-                        guidance_scale=float(guidance_scale),
-                        width=int(width),
-                        height=int(height),
-                        num_images_per_prompt=int(num_images)
-                    ).images
+            else:
+                 with open(log_path, "w") as f:
+                    f.write(f"Mode: Text2Image (Image arg missing/None)\n")
+                 
+                 images = self.pipeline(
+                    prompt=prompt,
+                    num_inference_steps=int(steps),
+                    # ...
+                 ).images
 
             results = []
             for img in images:
@@ -132,11 +129,12 @@ class SDXLBackend:
                 img.save(buffered, format="PNG")
                 img_str = base64.b64encode(buffered.getvalue()).decode("utf-8")
                 results.append(img_str)
-
             return results
 
         except Exception as e:
             self.logger.error(f"Generation failed: {e}")
+            with open("/home/bcoster/moondream_error.txt", "w") as f:
+                f.write(str(e))
             torch.cuda.empty_cache()
             raise e
 

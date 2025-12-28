@@ -8,4 +8,8 @@ uvicorn>=0.24.0
 pillow>=9.0
 packaging>=21.0
 posthog>=3.0.0
-prompt-toolkit>=3.0.0
+prompt-toolkit>=3.0.0einops
+sentencepiece
+timm
+protobuf
+accelerate

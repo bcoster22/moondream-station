@@ -1,115 +1,14 @@
 import asyncio
 import sys
 import os
-# Import SDXL backend from local backends directory
+# Add gallery project path to find SDXL backend
+if "/home/bcoster/Documents/Github_Projects/Gallery/Image-Gallery-2" not in sys.path:
+    sys.path.append("/home/bcoster/Documents/Github_Projects/Gallery/Image-Gallery-2")
+
 try:
-    # Add backends directory to path
-    backends_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), 'backends')
-    if backends_dir not in sys.path:
-        sys.path.insert(0, backends_dir)
-    
-    # Import the SDXL backend
-    from sdxl_backend.backend import SDXLBackend
-    
-    # Create a wrapper class that matches the expected interface
-    class SDXLBackendWrapper:
-        def __init__(self):
-            self._instance = None
-            self._current_model = None
-        
-        def init_backend(self, model_id="sdxl-realism", use_4bit=True):
-            """Initialize SDXL backend with specified model"""
-            try:
-                # Map model IDs to HuggingFace paths
-                model_mapping = {
-                    "sdxl-realism": "RunDiffusion/Juggernaut-XL-Lightning",
-                    "sdxl-anime": "cagliostrolab/animagine-xl-3.1",
-                    "sdxl-surreal": "Lykon/dreamshaper-xl-lightning"
-                }
-                hf_model = model_mapping.get(model_id, model_id)
-                
-                # Create or reinitialize if model changed
-                if self._instance is None or self._current_model != hf_model:
-                    config = {
-                        "model_id": hf_model,
-                        "use_4bit": use_4bit,
-                        "compile": False
-                    }
-                    self._instance = SDXLBackend(config)
-                    self._current_model = hf_model
-                
-                # Initialize if not already loaded
-                if self._instance.pipeline is None:
-                    print(f"[SDXL] Initializing backend with model: {hf_model}")
-                    self._instance.initialize()
-                
-                return True
-            except Exception as e:
-                print(f"[SDXL] Error initializing backend: {e}")
-                import traceback
-                traceback.print_exc()
-                return False
-        
-        def generate(self, prompt, width=1024, height=1024, steps=8, image=None, strength=0.75):
-            """Generate image using SDXL backend"""
-            if self._instance is None or self._instance.pipeline is None:
-                raise RuntimeError("SDXL backend not initialized")
-            
-            try:
-                # Call the backend's generate method
-                if hasattr(self._instance, 'generate'):
-                    return self._instance.generate(
-                        prompt=prompt,
-                        width=width,
-                        height=height,
-                        num_inference_steps=steps,
-                        init_image_b64=image,
-                        strength=strength
-                    )
-                else:
-                    # Fallback to direct pipeline call
-                    import base64
-                    import io
-                    from PIL import Image as PILImage
-                    
-                    result = self._instance.pipeline(
-                        prompt=prompt,
-                        width=width,
-                        height=height,
-                        num_inference_steps=steps
-                    ).images
-                    
-                    # Convert to base64
-                    output_images = []
-                    for img in result:
-                        buffer = io.BytesIO()
-                        img.save(buffer, format="PNG")
-                        img_b64 = base64.b64encode(buffer.getvalue()).decode('utf-8')
-                        output_images.append(img_b64)
-                    
-                    return output_images
-            except Exception as e:
-                print(f"[SDXL] Error generating image: {e}")
-                import traceback
-                traceback.print_exc()
-                raise
-        
-        def unload_backend(self):
-            """Unload SDXL backend to free VRAM"""
-            if self._instance is not None:
-                self._instance.pipeline = None
-                import torch
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
-                print("[SDXL] Backend unloaded and VRAM freed")
-    
-    # Create global instance
-    sdxl_backend_new = SDXLBackendWrapper()
-    print("[SDXL] Backend loaded successfully from local backends directory")
-    
-except ImportError as e:
-    print(f"Warning: Could not import SDXL backend: {e}")
-    print("SDXL generation will not be available.")
+    import sdxl_backend_new
+except ImportError:
+    print("Warning: Could not import sdxl_backend_new. Gen AI will not work.")
     sdxl_backend_new = None
 
 import json
@@ -387,106 +286,6 @@ class RestServer:
 
         yield f"data: {json.dumps({'completed': True})}\n\n"
 
-    def _discover_models_from_directories(self):
-        """
-        Auto-discover models from checkpoints/ and diffusers/ directories.
-        Returns a list of discovered models with metadata.
-        """
-        import glob
-        from pathlib import Path
-        
-        discovered = []
-        models_dir = os.environ.get("MOONDREAM_MODELS_DIR", os.path.expanduser("~/.moondream-station/models"))
-        
-        # Scan checkpoints directory for single-file models
-        checkpoints_dir = os.path.join(models_dir, "checkpoints")
-        if os.path.exists(checkpoints_dir):
-            # Support .safetensors, .ckpt, .bin
-            for ext in ["*.safetensors", "*.ckpt", "*.bin"]:
-                for filepath in glob.glob(os.path.join(checkpoints_dir, ext)):
-                    filename = os.path.basename(filepath)
-                    name_without_ext = os.path.splitext(filename)[0]
-                    file_format = os.path.splitext(filename)[1].replace(".", "")
-                    file_size = os.path.getsize(filepath)
-                    
-                    # Create a model ID from the filename
-                    model_id = f"custom/{name_without_ext}"
-                    
-                    # Check if this is already in curated list (don't duplicate)
-                    # This prevents showing the same model twice
-                    is_curated = False
-                    try:
-                        from moondream_station.config import SDXL_MODELS
-                        is_curated = any(
-                            info.get("hf_id", "").split("/")[-1].lower().replace("-", "").replace("_", "") 
-                            in name_without_ext.lower().replace("-", "").replace("_", "")
-                            for info in SDXL_MODELS.values()
-                        )
-                    except:
-                        pass
-                    
-                    if not is_curated:
-                        discovered.append({
-                            "id": model_id,
-                            "name": name_without_ext,
-                            "description": f"Custom {file_format.upper()} model",
-                            "version": "Custom",
-                            "type": "generation",
-                            "format": file_format,
-                            "source": "custom",
-                            "is_downloaded": True,
-                            "size_bytes": file_size,
-                            "file_path": filepath,
-                            "has_warning": file_format in ["ckpt", "bin"],  # Pickle-based formats
-                            "last_known_vram_mb": 6000
-                        })
-        
-        # Scan diffusers directory for folder-based models
-        diffusers_dir = os.path.join(models_dir, "diffusers")
-        if os.path.exists(diffusers_dir):
-            for item in os.listdir(diffusers_dir):
-                item_path = os.path.join(diffusers_dir, item)
-                if os.path.isdir(item_path):
-                    model_index = os.path.join(item_path, "model_index.json")
-                    if os.path.exists(model_index):
-                        # Calculate directory size
-                        total_size = sum(
-                            os.path.getsize(os.path.join(dirpath, filename))
-                            for dirpath, dirnames, filenames in os.walk(item_path)
-                            for filename in filenames
-                        )
-                        
-                        model_id = f"custom/{item}"
-                        
-                        # Check if this is already in curated list
-                        is_curated = False
-                        try:
-                            from moondream_station.config import SDXL_MODELS
-                            is_curated = any(
-                                info.get("hf_id", "").split("/")[-1].lower().replace("-", "").replace("_", "") 
-                                in item.lower().replace("-", "").replace("_", "")
-                                for info in SDXL_MODELS.values()
-                            )
-                        except:
-                            pass
-                        
-                        if not is_curated:
-                            discovered.append({
-                                "id": model_id,
-                                "name": item,
-                                "description": "Custom Diffusers model",
-                                "version": "Custom",
-                                "type": "generation",
-                                "format": "diffusers",
-                                "source": "custom",
-                                "is_downloaded": True,
-                                "size_bytes": total_size,
-                                "file_path": item_path,
-                                "has_warning": False,
-                                "last_known_vram_mb": 6000
-                            })
-        
-        return discovered
     def _setup_routes(self):
         @self.app.get("/health")
         async def health():
@@ -732,37 +531,19 @@ class RestServer:
         @self.app.get("/v1/models")
         async def list_models():
             try:
-                all_models = []
-                
-                # Get manifest models
                 models = self.manifest_manager.get_models()
-                for model_id, model_info in models.items():
-                    all_models.append({
-                        "id": model_id,
-                        "name": model_info.name,
-                        "description": model_info.description,
-                        "version": getattr(model_info, "version", "unknown"),
-                        "last_known_vram_mb": model_memory_tracker.get_last_known_vram(model_id),
-                    })
-                
-                # Get auto-discovered custom models
-                discovered = self._discover_models_from_directories()
-                all_models.extend(discovered)
-                
-                return {"models": all_models}
-            except Exception as e:
-                import traceback
-                traceback.print_exc()
-                raise HTTPException(status_code=500, detail=str(e))
-
-        @self.app.post("/v1/models/refresh")
-        async def refresh_models():
-            """
-            Refresh the model list by re-scanning directories.
-            Returns the updated model list.
-            """
-            try:
-                return await list_models()
+                return {
+                    "models": [
+                        {
+                            "id": model_id,
+                            "name": model_info.name,
+                            "description": model_info.description,
+                            "version": getattr(model_info, "version", "unknown"),
+                            "last_known_vram_mb": model_memory_tracker.get_last_known_vram(model_id),
+                        }
+                        for model_id, model_info in models.items()
+                    ]
+                }
             except Exception as e:
                 import traceback
                 traceback.print_exc()
@@ -790,12 +571,12 @@ class RestServer:
                 
             success = self.inference_service.start(model_id)
             if success:
-                # Capture previous model BEFORE updating config (Critical for unload logic)
+                # Capture previous model BEFORE updating config
                 previous_model = self.config.get("current_model")
                 
                 self.config.set("current_model", model_id)
                 
-                # Unload previous model from tracker
+                # Unload previous model from tracker (only one model loaded at a time)
                 try:
                     if previous_model and previous_model != model_id:
                         model_memory_tracker.track_model_unload(previous_model)
@@ -803,27 +584,15 @@ class RestServer:
                 except Exception as e:
                     print(f"Warning: Failed to unload previous model: {e}")
                 
-                # Track model load and get stats
-                vram_mb = 0
-                ram_mb = 0
+                # Track model load for memory monitoring
                 try:
                     model_info = self.manifest_manager.get_models().get(model_id)
                     if model_info:
                         model_memory_tracker.track_model_load(model_id, model_info.name)
-                        # Get the stats we just tracked
-                        if model_id in model_memory_tracker.loaded_models:
-                            stats = model_memory_tracker.loaded_models[model_id]
-                            vram_mb = stats.get("vram_mb", 0)
-                            ram_mb = stats.get("ram_mb", 0)
                 except Exception as e:
                     print(f"Warning: Failed to track model load: {e}")
                 
-                return {
-                    "status": "success", 
-                    "model": model_id,
-                    "vram_mb": vram_mb,
-                    "ram_mb": ram_mb
-                }
+                return {"status": "success", "model": model_id}
             else:
                 raise HTTPException(status_code=500, detail="Failed to switch model")
 
@@ -852,23 +621,8 @@ class RestServer:
             if not self.inference_service.is_running():
                 target_model = requested_model if requested_model else "moondream-2"
                 print(f"DEBUG: Service stopped. Auto-starting {target_model}...")
-                
-                # Check previous for unloading (edge case where service stopped but tracker has state)
-                previous_model = self.config.get("current_model")
-                
                 if self.inference_service.start(target_model):
                      self.config.set("current_model", target_model)
-                     
-                     # TRACKER UPDATE
-                     try:
-                         if previous_model and previous_model != target_model:
-                             model_memory_tracker.track_model_unload(previous_model)
-                         
-                         model_info = self.manifest_manager.get_models().get(target_model)
-                         if model_info:
-                             model_memory_tracker.track_model_load(target_model, model_info.name)
-                     except Exception as e:
-                         print(f"Warning: Failed to track auto-start: {e}")
                 else:
                      raise HTTPException(status_code=500, detail="Failed to start model")
 
@@ -878,26 +632,9 @@ class RestServer:
             if requested_model and requested_model != current_model:
                 if requested_model in self.manifest_manager.get_models():
                     print(f"Auto-switching to requested model: {requested_model}")
-                    
-                    # Capture previous for unload
-                    previous_before_switch = current_model
-                    
                     if self.inference_service.start(requested_model):
                         self.config.set("current_model", requested_model)
                         current_model = requested_model
-                        
-                        # TRACKER UPDATE
-                        try:
-                            if previous_before_switch:
-                                model_memory_tracker.track_model_unload(previous_before_switch)
-                                print(f"[Tracker] Auto-switch unloaded: {previous_before_switch}")
-                                
-                            model_info = self.manifest_manager.get_models().get(requested_model)
-                            if model_info:
-                                model_memory_tracker.track_model_load(requested_model, model_info.name)
-                                print(f"[Tracker] Auto-switch loaded: {requested_model}")
-                        except Exception as e:
-                            print(f"Warning: Failed to track auto-switch: {e}")
                     else:
                         raise HTTPException(status_code=500, detail=f"Failed to switch to model {requested_model}")
                 else:
@@ -1090,27 +827,9 @@ class RestServer:
         if requested_model and requested_model != current_model:
             if requested_model in self.manifest_manager.get_models():
                 print(f"Auto-switching to requested model: {requested_model}")
-                # Capture previous model for tracking unloading BEFORE switch
-                previous_model_auto = self.config.get("current_model")
-                
                 if self.inference_service.start(requested_model):
                     self.config.set("current_model", requested_model)
                     current_model = requested_model
-                    
-                    # SYSTEM INTEGRATION: Track model switch in memory tracker
-                    try:
-                        # 1. Unload previous
-                        if previous_model_auto and previous_model_auto != requested_model:
-                            model_memory_tracker.track_model_unload(previous_model_auto)
-                            print(f"[Tracker] Unloaded previous model on auto-switch: {previous_model_auto}")
-                            
-                        # 2. Load new
-                        model_info = self.manifest_manager.get_models().get(requested_model)
-                        if model_info:
-                            model_memory_tracker.track_model_load(requested_model, model_info.name)
-                            print(f"[Tracker] Tracked new model on auto-switch: {requested_model}")
-                    except Exception as e:
-                        print(f"[Tracker] Warning: Failed to track auto-switch: {e}")
                 else:
                     raise HTTPException(status_code=500, detail=f"Failed to switch to model {requested_model}")
             else:
