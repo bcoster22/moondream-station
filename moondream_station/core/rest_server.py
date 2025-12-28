@@ -686,6 +686,7 @@ class RestServer:
                 steps = data.get("steps", 8)
                 image = data.get("image") 
                 strength = data.get("strength", 0.75)
+                scheduler = data.get("scheduler", "euler")
 
                 try:
                     result = sdxl_backend_new.generate(
@@ -694,7 +695,8 @@ class RestServer:
                         height=height,
                         steps=steps,
                         image=image,
-                        strength=strength
+                        strength=strength,
+                        scheduler=scheduler
                     )
                 except Exception as gen_err:
                     if "out of memory" in str(gen_err).lower():
@@ -711,17 +713,34 @@ class RestServer:
                             height=height,
                             steps=steps,
                             image=image,
-                            strength=strength
+                            strength=strength,
+                            scheduler=scheduler
                         )
                     else:
                         raise gen_err
 
+                # Extract images and stats
+                generated_images = []
+                stats = {}
+                
+                if isinstance(result, dict) and "images" in result:
+                    generated_images = result["images"]
+                    stats = result.get("stats", {})
+                else:
+                    generated_images = result
+                
                 # Low VRAM Cleanup
                 if vram_mode == "low":
                     print("[VRAM] Low mode: Unloading SDXL after generation.")
                     sdxl_backend_new.unload_backend()
 
-                return {"created": int(time.time()), "data": [{"b64_json": img} for img in result], "images": result, "image": result[0] if result else None}
+                return {
+                    "created": int(time.time()), 
+                    "data": [{"b64_json": img} for img in generated_images], 
+                    "images": generated_images, 
+                    "image": generated_images[0] if generated_images else None,
+                    "stats": stats
+                }
 
             except Exception as e:
                 import traceback
@@ -734,18 +753,83 @@ class RestServer:
             try:
                 all_models = []
                 
-                # Get manifest models
-                models = self.manifest_manager.get_models()
-                for model_id, model_info in models.items():
-                    all_models.append({
-                        "id": model_id,
-                        "name": model_info.name,
-                        "description": model_info.description,
-                        "version": getattr(model_info, "version", "unknown"),
-                        "last_known_vram_mb": model_memory_tracker.get_last_known_vram(model_id),
-                    })
+                # 1. Manifest Models (Vision/Analysis)
+                manifest_models_dict = self.manifest_manager.get_models()
+                for manifest_key, m_raw in manifest_models_dict.items():
+                    m_data = {}
+                    if hasattr(m_raw, "model_dump"): m_data = m_raw.model_dump()
+                    elif hasattr(m_raw, "dict"): m_data = m_raw.dict()
+                    elif hasattr(m_raw, "__dict__"): m_data = m_raw.__dict__
+                    elif isinstance(m_raw, dict): m_data = m_raw
+                    
+                    # Use manifest key as ID if no explicit ID found
+                    mid = m_data.get("id") or m_data.get("model_id") or m_data.get("args", {}).get("model_id") or manifest_key
+                    
+                    m = {
+                        "id": mid,
+                        "name": m_data.get("name", mid),
+                        "description": m_data.get("description", ""),
+                        "version": m_data.get("version", "1.0.0"),
+                        "is_downloaded": True,
+                        "last_known_vram_mb": model_memory_tracker.get_last_known_vram(mid)
+                    }
+                    
+                    # Auto-categorize by model ID
+                    mid_lower = mid.lower()
+                    if "moondream" in mid_lower or "florence" in mid_lower or "joycaption" in mid_lower:
+                        m["type"] = "vision"
+                    elif "wd14" in mid_lower or "tagger" in mid_lower:
+                        m["type"] = "analysis"
+                    elif "sdxl" in mid_lower or "juggernaut" in mid_lower or "animagine" in mid_lower or "dreamshaper" in mid_lower or "proteus" in mid_lower or "realvis" in mid_lower or "cyberrealistic" in mid_lower:
+                        m["type"] = "generation"
+                    else:
+                        m["type"] = "analysis"
+                    
+                    all_models.append(m)
                 
-                # Get auto-discovered custom models
+                # 2. Curated SDXL Models (Generation)
+                try:
+                    from moondream_station.config import SDXL_MODELS
+                    for model_id, model_info in SDXL_MODELS.items():
+                        # Detect if downloaded and format
+                        is_downloaded = False
+                        size_bytes = 0
+                        detected_format = None
+                        
+                        try:
+                            if sdxl_backend_new:
+                                is_downloaded = sdxl_backend_new.is_model_downloaded(model_info.get("hf_id"))
+                                if hasattr(sdxl_backend_new, "get_model_file_details"):
+                                    file_path, size_bytes = sdxl_backend_new.get_model_file_details(model_info.get("hf_id"))
+                                    if file_path:
+                                        if os.path.isdir(file_path) and os.path.exists(os.path.join(file_path, "model_index.json")):
+                                            detected_format = "diffusers"
+                                        elif os.path.isfile(file_path):
+                                            ext = os.path.splitext(file_path)[1].lower()
+                                            detected_format = ext.replace(".", "")
+                        except: pass
+                        
+                        # Add format badge to display name
+                        display_name = model_info["name"]
+                        if detected_format:
+                            display_name = f"{display_name} [{detected_format.upper()}]"
+                        
+                        all_models.append({
+                            "id": model_id,
+                            "name": display_name,
+                            "description": model_info["description"],
+                            "version": "SDXL",
+                            "last_known_vram_mb": model_memory_tracker.get_last_known_vram(model_id) or 6000,
+                            "type": "generation",
+                            "source": "curated",
+                            "is_downloaded": is_downloaded,
+                            "size_bytes": size_bytes,
+                            "format": detected_format,
+                            "has_warning": False
+                        })
+                except: pass
+                
+                # 3. Auto-discovered Custom Models
                 discovered = self._discover_models_from_directories()
                 all_models.extend(discovered)
                 
