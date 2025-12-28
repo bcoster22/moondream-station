@@ -649,6 +649,70 @@ class RestServer:
                 if hasattr(e, "status_code"): raise e
                 raise HTTPException(status_code=500, detail=str(e))
 
+        @self.app.post("/v1/vision/batch-caption")
+        async def batch_caption(request: Request):
+            """
+            Batch caption generic images (e.g. WD14 Tagger). 
+            Accepts: { "images": ["b64...", ...], "model": "..." }
+            """
+            if not self.inference_service.is_running():
+                return JSONResponse(content={"error": "Inference service not running"}, status_code=503)
+
+            try:
+                data = await request.json()
+                images_b64 = data.get("images", [])
+                model_id = data.get("model", self.config.get("current_model"))
+                
+                if not images_b64 or not isinstance(images_b64, list):
+                    return JSONResponse(content={"error": "images must be a list of base64 strings"}, status_code=400)
+
+                # Ensure correct model is loaded
+                if self.config.get("current_model") != model_id:
+                     print(f"[Batch] Switching to {model_id}...")
+                     if not self.inference_service.start(model_id):
+                         return JSONResponse(content={"error": f"Failed to load model {model_id}"}, status_code=500)
+                     self.config.set("current_model", model_id)
+
+                # Decode all images
+                pil_images = []
+                import base64
+                import io
+                from PIL import Image
+                
+                for b64 in images_b64:
+                    if b64.startswith("data:image"):
+                        _, encoded = b64.split(",", 1)
+                    else:
+                        encoded = b64
+                    # Don't decode yet if the worker is in another process? 
+                    # Actually, we pass objects to simple worker pool which runs in a thread executor, so passing PIL is fine.
+                    raw_bytes = base64.b64decode(encoded)
+                    img = Image.open(io.BytesIO(raw_bytes)).convert("RGB")
+                    pil_images.append(img)
+
+                # Execute Batch
+                start_time = time.time()
+                captions = await self.inference_service.execute_function("caption", image=pil_images)
+                
+                duration = time.time() - start_time
+
+                return {
+                    "captions": captions,
+                    "count": len(captions) if isinstance(captions, list) else 1,
+                    "duration": round(duration, 3)
+                }
+
+                return {
+                    "captions": captions,
+                    "count": len(captions) if isinstance(captions, list) else 1,
+                    "duration": round(duration, 3)
+                }
+
+            except Exception as e:
+                import traceback
+                traceback.print_exc()
+                return JSONResponse(content={"error": str(e)}, status_code=500)
+
         @self.app.post("/v1/generate")
         async def generate_image(request: Request):
             """

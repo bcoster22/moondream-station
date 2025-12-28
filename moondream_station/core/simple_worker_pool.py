@@ -39,8 +39,7 @@ class SimpleWorkerPool:
                 try:
                     # Execute the function
                     result = function(**kwargs)
-                    result_dict = result if isinstance(result, dict) else {"result": result}
-                    result_future.set_result(result_dict)
+                    result_future.set_result(result)
                 except Exception as e:
                     result_future.set_result({"error": str(e), "status": "error"})
                 finally:

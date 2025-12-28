@@ -7,9 +7,11 @@ import signal
 
 # Ensure we can import moondream_station
 current_dir = os.path.dirname(os.path.abspath(__file__))
-sys.path.append(current_dir)
+sys.path.insert(0, current_dir)
 
 from moondream_station.core.config import ConfigManager
+import moondream_station
+print(f"DEBUG: moondream_station loaded from: {moondream_station.__file__}", flush=True)
 from moondream_station.core.manifest import ManifestManager
 from moondream_station.core.analytics import Analytics
 from moondream_station.core.service import ServiceManager
