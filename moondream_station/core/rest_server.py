@@ -702,7 +702,7 @@ class RestServer:
                 if version.parse(current_torch) < version.parse("2.6.0"):
                     has_critical_update = True
                     critical_message = "CRITICAL: Torch version < 2.6.0 detected. Vulnerability CVE-2025-32434 present. Upgrade immediately."
-            except:
+            except Exception:
                 pass
 
             return {
@@ -785,7 +785,7 @@ class RestServer:
                     add_result("PyTorch Version", True, f"v{torch_ver} (Secure)")
                 else:
                     add_result("PyTorch Version", False, f"v{torch_ver} (Insecure - CVE-2025-32434)")
-            except:
+            except Exception:
                 add_result("PyTorch Version", False, "Not Installed")
 
             # 2. CUDA Availability
@@ -825,7 +825,7 @@ class RestServer:
                 requests.head("https://huggingface.co", timeout=3)
                 latency = (time.time() - start) * 1000
                 add_result("Network (HuggingFace)", True, f"Reachable ({latency:.0f}ms)")
-            except:
+            except Exception:
                 add_result("Network (HuggingFace)", False, "Unreachable - Models cannot download")
 
             # 6. FFmpeg Check
@@ -892,8 +892,9 @@ class RestServer:
                 if not password:
                     raise HTTPException(status_code=400, detail="Password required")
                 
-                # Path to setup script (adjustable)
-                script_path = "/home/bcoster/.moondream-station/moondream-station/setup_gpu_reset.sh"
+                # Path to setup script (dynamic, portable)
+                script_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+                script_path = os.path.join(script_dir, "setup_gpu_reset.sh")
                 
                 if not os.path.exists(script_path):
                     raise HTTPException(status_code=500, detail=f"Setup script not found: {script_path}")
@@ -1010,28 +1011,51 @@ class RestServer:
                 gpu_id = int(params.get("gpu_id", 0))
                 enable = params.get("enable", "true").lower() == "true"
                 
+                # Validate gpu_id
+                if gpu_id < 0:
+                    raise HTTPException(status_code=400, detail="Invalid gpu_id: must be >= 0")
+                
+                # Query GPU's actual max power limit dynamically
+                try:
+                    query_result = subprocess.run(
+                        ["nvidia-smi", "-i", str(gpu_id), "--query-gpu=power.limit", "--format=csv,noheader,nounits"],
+                        capture_output=True, text=True, timeout=5
+                    )
+                    if query_result.returncode == 0:
+                        max_power = float(query_result.stdout.strip())
+                        boost_power = int(max_power)  # Use actual max
+                        normal_power = int(max_power * 0.75)  # 75% of max
+                    else:
+                        # Fallback to conservative defaults if query fails
+                        boost_power = 250
+                        normal_power = 200
+                except Exception:
+                    # Fallback defaults
+                    boost_power = 250
+                    normal_power = 200
+                
                 if enable:
                     # Boost Mode: Max fans + Persistence
                     commands = [
                         ["sudo", "-n", "nvidia-smi", "-i", str(gpu_id), "-pm", "1"],  # Persistence mode ON
-                        ["sudo", "-n", "nvidia-smi", "-i", str(gpu_id), "-pl", "350"]  # Max power limit
+                        ["sudo", "-n", "nvidia-smi", "-i", str(gpu_id), "-pl", str(boost_power)]  # Max power
                     ]
                     # Try to set fan speed if supported
                     try:
                         subprocess.run(["sudo", "-n", "nvidia-settings", "-a", f"[gpu:{gpu_id}]/GPUFanControlState=1"], timeout=5)
                         subprocess.run(["sudo", "-n", "nvidia-settings", "-a", f"[fan:{gpu_id}]/GPUTargetFanSpeed=100"], timeout=5)
-                    except:
+                    except Exception:
                         pass  # Fan control not always supported
                 else:
                     # Normal Mode: Auto fans + Default settings
                     commands = [
                         ["sudo", "-n", "nvidia-smi", "-i", str(gpu_id), "-pm", "0"],  # Persistence mode OFF
-                        ["sudo", "-n", "nvidia-smi", "-i", str(gpu_id), "-pl", "250"]  # Default power limit
+                        ["sudo", "-n", "nvidia-smi", "-i", str(gpu_id), "-pl", str(normal_power)]  # 75% power
                     ]
                     # Reset fan to auto
                     try:
                         subprocess.run(["sudo", "-n", "nvidia-settings", "-a", f"[gpu:{gpu_id}]/GPUFanControlState=0"], timeout=5)
-                    except:
+                    except Exception:
                         pass
                 
                 # Execute commands
@@ -1041,7 +1065,7 @@ class RestServer:
                         raise HTTPException(status_code=403, detail="Permission denied. Passwordless sudo required.")
                 
                 mode = "Boost" if enable else "Normal"
-                return {"status": "success", "message": f"GPU {gpu_id} set to {mode} mode"}
+                return {"status": "success", "message": f"GPU {gpu_id} set to {mode} mode (power: {boost_power if enable else normal_power}W)"}
                 
             except HTTPException:
                 raise

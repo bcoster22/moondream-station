@@ -13,3 +13,4 @@ sentencepiece
 timm
 protobuf
 accelerate
+packaging>=21.0
