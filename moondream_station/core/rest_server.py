@@ -943,13 +943,6 @@ class RestServer:
                 ]
             }
 
-        @self.app.get("/v1/models/sdxl")
-        async def list_sdxl_models():
-            """List SDXL-specific models"""
-            from moondream_station.core.rest_server import get_models
-            all_models = list(self.manifest_manager.get_models().values())
-            sdxl_models = [m for m in all_models if 'sdxl' in str(getattr(m, 'id', '')).lower()]
-            return {"models": sdxl_models}
 
         @self.app.post("/v1/system/update-packages")
         async def update_packages(request: Request):
