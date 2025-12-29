@@ -649,6 +649,31 @@ class RestServer:
                 if hasattr(e, "status_code"): raise e
                 raise HTTPException(status_code=500, detail=str(e))
 
+        @self.app.get("/v1/system/zombie-killer")
+        async def get_zombie_killer_status():
+            """Get auto-free zombie VRAM status"""
+            enabled = self.config.get("zombie_killer_enabled", False)
+            interval = self.config.get("zombie_killer_interval", 60)
+            return {"enabled": enabled, "interval": interval}
+
+        @self.app.post("/v1/system/zombie-killer")
+        async def toggle_zombie_killer(request: Request):
+            """Toggle auto-free zombie VRAM feature"""
+            try:
+                data = await request.json()
+                if "enabled" in data:
+                    self.config.set("zombie_killer_enabled", bool(data["enabled"]))
+                if "interval" in data:
+                    self.config.set("zombie_killer_interval", max(30, int(data["interval"])))
+                
+                enabled = self.config.get("zombie_killer_enabled", False)
+                interval = self.config.get("zombie_killer_interval", 60)
+                
+                print(f"[Zombie Killer] Auto-free VRAM: {'ENABLED' if enabled else 'DISABLED'} (interval: {interval}s)")
+                return {"enabled": enabled, "interval": interval}
+            except Exception as e:
+                raise HTTPException(status_code=500, detail=str(e))
+
         @self.app.post("/v1/vision/batch-caption")
         async def batch_caption(request: Request):
             """
