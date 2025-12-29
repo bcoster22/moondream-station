@@ -675,6 +675,178 @@ class RestServer:
             except Exception as e:
                 raise HTTPException(status_code=500, detail=str(e))
 
+        @self.app.get("/v1/system/backend-version")
+        async def get_backend_versions():
+            """
+            Get versions of key backend libraries and check for critical updates.
+            """
+            import importlib.metadata
+            import torch
+            from packaging import version
+            import sys
+            
+            libs = ['torch', 'torchvision', 'torchaudio', 'diffusers', 'transformers', 'accelerate', 'moondream']
+            versions = {}
+            for lib in libs:
+                try:
+                    versions[lib] = importlib.metadata.version(lib)
+                except importlib.metadata.PackageNotFoundError:
+                    versions[lib] = "Not Installed"
+
+            # Check for critical vulnerability CVE-2025-32434
+            current_torch = versions.get('torch', '0.0.0').split('+')[0]
+            has_critical_update = False
+            critical_message = ""
+            
+            try:
+                if version.parse(current_torch) < version.parse("2.6.0"):
+                    has_critical_update = True
+                    critical_message = "CRITICAL: Torch version < 2.6.0 detected. Vulnerability CVE-2025-32434 present. Upgrade immediately."
+            except:
+                pass
+
+            return {
+                "versions": versions,
+                "has_critical_update": has_critical_update,
+                "critical_message": critical_message,
+                "python_version": sys.version.split(' ')[0],
+                "platform": sys.platform
+            }
+
+        @self.app.post("/v1/system/upgrade-backend")
+        async def upgrade_backend():
+            """
+            Upgrade backend dependencies to fix security vulnerabilities.
+            Specifically targets torch 2.6.0+ and compatible libraries.
+            """
+            import subprocess
+            import sys
+            from fastapi.responses import JSONResponse
+            
+            # Command to upgrade torch, torchvision, torchaudio to 2.6.0+ for CUDA 12.4 (compatible with 12.6)
+            pip_cmd = [
+                sys.executable, "-m", "pip", "install", 
+                "torch>=2.6.0", "torchvision>=0.21.0", "torchaudio>=2.6.0", 
+                "diffusers>=0.36.0", "transformers>=4.48.0", "accelerate>=1.3.0",
+                "--index-url", "https://download.pytorch.org/whl/cu124", 
+                "--upgrade", "--no-cache-dir"
+            ]
+            
+            print(f"[System] Upgrading backend: {' '.join(pip_cmd)}")
+            
+            try:
+                process = subprocess.run(
+                    pip_cmd,
+                    capture_output=True,
+                    text=True,
+                    timeout=600  # 10 minutes for big downloads
+                )
+                
+                if process.returncode == 0:
+                    return {"status": "success", "message": "Backend upgraded successfully. Please restart the backend server."}
+                else:
+                    return JSONResponse(status_code=500, content={
+                        "status": "error", 
+                        "message": "Upgrade failed", 
+                        "details": process.stderr[-1000:]  # Last 1000 chars
+                    })
+            except subprocess.TimeoutExpired:
+                return JSONResponse(status_code=504, content={"status": "error", "message": "Upgrade timed out (download taking too long). Check server logs."})
+            except Exception as e:
+                return JSONResponse(status_code=500, content={"status": "error", "message": str(e)})
+
+        @self.app.get("/v1/system/verify-backend")
+        async def verify_backend():
+            """
+            Run comprehensive system health checks.
+            """
+            import torch
+            import shutil
+            import subprocess
+            import time
+            import requests
+            from packaging import version
+            import importlib.metadata
+            import sys
+            from fastapi.responses import JSONResponse
+            
+            checks = []
+            all_passed = True
+            
+            def add_result(name, passed, message):
+                nonlocal all_passed
+                if not passed: all_passed = False
+                checks.append({"name": name, "passed": passed, "message": message})
+
+            # 1. Framework Versions
+            try:
+                torch_ver = importlib.metadata.version('torch')
+                if version.parse(torch_ver) >= version.parse("2.6.0"):
+                    add_result("PyTorch Version", True, f"v{torch_ver} (Secure)")
+                else:
+                    add_result("PyTorch Version", False, f"v{torch_ver} (Insecure - CVE-2025-32434)")
+            except:
+                add_result("PyTorch Version", False, "Not Installed")
+
+            # 2. CUDA Availability
+            if torch.cuda.is_available():
+                device_name = torch.cuda.get_device_name(0)
+                add_result("CUDA GPU", True, f"Available: {device_name}")
+            else:
+                add_result("CUDA GPU", False, "Not available (Running on CPU)")
+
+            # 3. VRAM Check
+            try:
+                if torch.cuda.is_available():
+                    free_mem = torch.cuda.mem_get_info()[0] / 1024**3
+                    total_mem = torch.cuda.mem_get_info()[1] / 1024**3
+                    add_result("VRAM", True, f"{free_mem:.1f}GB free / {total_mem:.1f}GB total")
+                else:
+                    add_result("VRAM", True, "N/A (CPU Mode)")
+            except Exception as e:
+                add_result("VRAM", False, f"Error checking VRAM: {str(e)}")
+
+            # 4. Disk Space
+            try:
+                total, used, free = shutil.disk_usage(".")
+                free_gb = free / 1024**3
+                if free_gb > 10:
+                    add_result("Disk Space", True, f"{free_gb:.1f} GB available")
+                elif free_gb > 2:
+                    add_result("Disk Space", True, f"Low space: {free_gb:.1f} GB available (Warning)")
+                else:
+                    add_result("Disk Space", False, f"Critical low space: {free_gb:.1f} GB")
+            except Exception as e:
+                add_result("Disk Space", False, f"Error: {str(e)}")
+
+            # 5. Network Connectivity (HuggingFace)
+            try:
+                start = time.time()
+                requests.head("https://huggingface.co", timeout=3)
+                latency = (time.time() - start) * 1000
+                add_result("Network (HuggingFace)", True, f"Reachable ({latency:.0f}ms)")
+            except:
+                add_result("Network (HuggingFace)", False, "Unreachable - Models cannot download")
+
+            # 6. FFmpeg Check
+            if shutil.which("ffmpeg"):
+                add_result("FFmpeg", True, "Installed (Video generation ready)")
+            else:
+                add_result("FFmpeg", False, "Not found (Video/Audio generation will fail)")
+                
+            # 7. Functional Test (Tensor Op)
+            try:
+                if torch.cuda.is_available():
+                    x = torch.rand(5, 5).cuda()
+                    y = x * x
+                    add_result("GPU Tensor Op", True, "Pass")
+                else:
+                    add_result("GPU Tensor Op", True, "Skipped (CPU Mode)")
+            except Exception as e:
+                add_result("GPU Tensor Op", False, f"Failed: {str(e)}")
+
+            return {"checks": checks, "overallStatus": "ok" if all_passed else "failed"}
+
         @self.app.post("/v1/vision/batch-caption")
         async def batch_caption(request: Request):
             """
