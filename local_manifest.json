@@ -44,57 +44,6 @@
                 "darwin"
             ]
         },
-        "sdxl-realism": {
-            "name": "SDXL Realism (Juggernaut)",
-            "description": "Photorealistic images using Juggernaut XL Lightning (4-step)",
-            "backend": "sdxl_backend",
-            "args": {
-                "model_id": "RunDiffusion/Juggernaut-XL-Lightning",
-                "use_4bit": true
-            },
-            "system_requirements": {
-                "RAM": "12GB",
-                "GPU": "CUDA (8GB VRAM)",
-                "Storage": "7GB available"
-            },
-            "supported_os": [
-                "linux"
-            ]
-        },
-        "sdxl-anime": {
-            "name": "SDXL Anime (Animagine)",
-            "description": "High-quality Anime style using Animagine XL 3.1",
-            "backend": "sdxl_backend",
-            "args": {
-                "model_id": "cagliostrolab/animagine-xl-3.1",
-                "use_4bit": true
-            },
-            "system_requirements": {
-                "RAM": "12GB",
-                "GPU": "CUDA (8GB VRAM)",
-                "Storage": "7GB available"
-            },
-            "supported_os": [
-                "linux"
-            ]
-        },
-        "sdxl-surreal": {
-            "name": "SDXL Surreal (DreamShaper)",
-            "description": "Artistic and Surreal style using DreamShaper XL Lightning",
-            "backend": "sdxl_backend",
-            "args": {
-                "model_id": "Lykon/dreamshaper-xl-lightning",
-                "use_4bit": true
-            },
-            "system_requirements": {
-                "RAM": "12GB",
-                "GPU": "CUDA (8GB VRAM)",
-                "Storage": "7GB available"
-            },
-            "supported_os": [
-                "linux"
-            ]
-        },
         "nsfw-detector": {
             "name": "NSFW Detector (Marqo)",
             "description": "NSFW Image Detection using Marqo/nsfw-image-detection-384",
