@@ -390,7 +390,8 @@ class RestServer:
 
     def _discover_models_from_directories(self):
         """
-        Auto-discover models from checkpoints/ and diffusers/ directories.
+        Auto-discover models from all model directories.
+        Scans: analysis/, vision/, models/, diffusers/, checkpoints/
         Returns a list of discovered models with metadata.
         """
         import glob
@@ -399,50 +400,155 @@ class RestServer:
         discovered = []
         models_dir = os.environ.get("MOONDREAM_MODELS_DIR", os.path.expanduser("~/.moondream-station/models"))
         
-        # Scan checkpoints directory for single-file models
+        # Helper function to categorize models by directory and name
+        def categorize_model(path, name):
+            name_lower = name.lower()
+            path_lower = path.lower()
+            
+            # Check directory first
+            if "/analysis/" in path_lower or "wd14" in name_lower or "tagger" in name_lower or "swinv2" in name_lower:
+                return "analysis"
+            elif "/vision/" in path_lower or "moondream" in name_lower or "florence" in name_lower or "joycaption" in name_lower or "joy-caption" in name_lower:
+                return "vision"
+            else:
+                # Default to generation for diffusers/checkpoints
+                return "generation"
+        
+        # 1. Scan analysis/ directory for WD14 and other taggers
+        analysis_dir = os.path.join(models_dir, "analysis")
+        if os.path.exists(analysis_dir):
+            for item in os.listdir(analysis_dir):
+                item_path = os.path.join(analysis_dir, item)
+                if os.path.isdir(item_path):
+                    # Check if it's a valid model directory (has config files)
+                    has_config = any(os.path.exists(os.path.join(item_path, f)) 
+                                    for f in ["config.json", "model_index.json", "preprocessor_config.json"])
+                    if has_config:
+                        total_size = sum(
+                            os.path.getsize(os.path.join(dirpath, filename))
+                            for dirpath, dirnames, filenames in os.walk(item_path)
+                            for filename in filenames
+                        )
+                        
+                        discovered.append({
+                            "id": f"analysis/{item}",
+                            "name": item.replace("-", " ").replace("_", " ").title(),
+                            "description": "Image tagging and analysis model",
+                            "version": "Custom",
+                            "type": "analysis",
+                            "format": "transformers",
+                            "source": "custom",
+                            "is_downloaded": True,
+                            "size_bytes": total_size,
+                            "file_path": item_path,
+                            "has_warning": False,
+                            "last_known_vram_mb": 2000
+                        })
+        
+        # 2. Scan vision/ directory for Moondream and other vision models
+        vision_dir = os.path.join(models_dir, "vision")
+        if os.path.exists(vision_dir):
+            for item in os.listdir(vision_dir):
+                item_path = os.path.join(vision_dir, item)
+                if os.path.isdir(item_path):
+                    has_config = any(os.path.exists(os.path.join(item_path, f)) 
+                                    for f in ["config.json", "model_index.json", "preprocessor_config.json"])
+                    if has_config:
+                        total_size = sum(
+                            os.path.getsize(os.path.join(dirpath, filename))
+                            for dirpath, dirnames, filenames in os.walk(item_path)
+                            for filename in filenames
+                        )
+                        
+                        discovered.append({
+                            "id": f"vision/{item}",
+                            "name": item.replace("-", " ").replace("_", " ").title(),
+                            "description": "Vision-language model for image understanding",
+                            "version": "Custom",
+                            "type": "vision",
+                            "format": "transformers",
+                            "source": "custom",
+                            "is_downloaded": True,
+                            "size_bytes": total_size,
+                            "file_path": item_path,
+                            "has_warning": False,
+                            "last_known_vram_mb": 4000
+                        })
+        
+        # 3. Scan models/models--* for HuggingFace cached models
+        hf_models_dir = os.path.join(models_dir, "models")
+        if os.path.exists(hf_models_dir):
+            for item in os.listdir(hf_models_dir):
+                if item.startswith("models--") and not item.startswith("."):
+                    item_path = os.path.join(hf_models_dir, item)
+                    if os.path.isdir(item_path):
+                        # Extract model name from "models--org--model" format
+                        model_name = item.replace("models--", "").replace("--", "/")
+                        display_name = model_name.split("/")[-1].replace("-", " ").title()
+                        
+                        # Look for snapshots directory
+                        snapshots_dir = os.path.join(item_path, "snapshots")
+                        if os.path.exists(snapshots_dir):
+                            snapshots = [d for d in os.listdir(snapshots_dir) if os.path.isdir(os.path.join(snapshots_dir, d))]
+                            if snapshots:
+                                latest_snapshot = os.path.join(snapshots_dir, snapshots[0])
+                                
+                                # Check if it's a diffusers model
+                                is_diffusers = os.path.exists(os.path.join(latest_snapshot, "model_index.json"))
+                                
+                                if is_diffusers:
+                                    total_size = sum(
+                                        os.path.getsize(os.path.join(dirpath, filename))
+                                        for dirpath, dirnames, filenames in os.walk(item_path)
+                                        for filename in filenames
+                                    )
+                                    
+                                    model_type = categorize_model(latest_snapshot, model_name)
+                                    
+                                    discovered.append({
+                                        "id": f"hf/{model_name}",
+                                        "name": f"{display_name} [DIFFUSERS]",
+                                        "description": f"Diffusers model from HuggingFace",
+                                        "version": "HF Cache",
+                                        "type": model_type,
+                                        "format": "diffusers",
+                                        "source": "custom",
+                                        "is_downloaded": True,
+                                        "size_bytes": total_size,
+                                        "file_path": latest_snapshot,
+                                        "has_warning": False,
+                                        "last_known_vram_mb": 6000
+                                    })
+        
+        # 4. Scan checkpoints/ directory for single-file models
         checkpoints_dir = os.path.join(models_dir, "checkpoints")
         if os.path.exists(checkpoints_dir):
-            # Support .safetensors, .ckpt, .bin
-            for ext in ["*.safetensors", "*.ckpt", "*.bin"]:
+            for ext in ["*.safetensors", "*.ckpt", "*.bin", "*.pt"]:
                 for filepath in glob.glob(os.path.join(checkpoints_dir, ext)):
                     filename = os.path.basename(filepath)
                     name_without_ext = os.path.splitext(filename)[0]
                     file_format = os.path.splitext(filename)[1].replace(".", "")
                     file_size = os.path.getsize(filepath)
                     
-                    # Create a model ID from the filename
-                    model_id = f"custom/{name_without_ext}"
+                    model_id = f"checkpoint/{name_without_ext}"
+                    model_type = categorize_model(filepath, name_without_ext)
                     
-                    # Check if this is already in curated list (don't duplicate)
-                    # This prevents showing the same model twice
-                    is_curated = False
-                    try:
-                        from moondream_station.config import SDXL_MODELS
-                        is_curated = any(
-                            info.get("hf_id", "").split("/")[-1].lower().replace("-", "").replace("_", "") 
-                            in name_without_ext.lower().replace("-", "").replace("_", "")
-                            for info in SDXL_MODELS.values()
-                        )
-                    except:
-                        pass
-                    
-                    if not is_curated:
-                        discovered.append({
-                            "id": model_id,
-                            "name": name_without_ext,
-                            "description": f"Custom {file_format.upper()} model",
-                            "version": "Custom",
-                            "type": "generation",
-                            "format": file_format,
-                            "source": "custom",
-                            "is_downloaded": True,
-                            "size_bytes": file_size,
-                            "file_path": filepath,
-                            "has_warning": file_format in ["ckpt", "bin"],  # Pickle-based formats
-                            "last_known_vram_mb": 6000
-                        })
+                    discovered.append({
+                        "id": model_id,
+                        "name": f"{name_without_ext} [{file_format.upper()}]",
+                        "description": f"Custom {file_format.upper()} checkpoint",
+                        "version": "Custom",
+                        "type": model_type,
+                        "format": file_format,
+                        "source": "custom",
+                        "is_downloaded": True,
+                        "size_bytes": file_size,
+                        "file_path": filepath,
+                        "has_warning": file_format in ["ckpt", "bin"],  # Pickle-based formats
+                        "last_known_vram_mb": 6000
+                    })
         
-        # Scan diffusers directory for folder-based models
+        # 5. Scan diffusers/ directory for folder-based models
         diffusers_dir = os.path.join(models_dir, "diffusers")
         if os.path.exists(diffusers_dir):
             for item in os.listdir(diffusers_dir):
@@ -450,42 +556,30 @@ class RestServer:
                 if os.path.isdir(item_path):
                     model_index = os.path.join(item_path, "model_index.json")
                     if os.path.exists(model_index):
-                        # Calculate directory size
                         total_size = sum(
                             os.path.getsize(os.path.join(dirpath, filename))
                             for dirpath, dirnames, filenames in os.walk(item_path)
                             for filename in filenames
                         )
                         
-                        model_id = f"custom/{item}"
+                        model_id = f"diffusers/{item}"
+                        display_name = item.replace("-", " ").title()
+                        model_type = categorize_model(item_path, item)
                         
-                        # Check if this is already in curated list
-                        is_curated = False
-                        try:
-                            from moondream_station.config import SDXL_MODELS
-                            is_curated = any(
-                                info.get("hf_id", "").split("/")[-1].lower().replace("-", "").replace("_", "") 
-                                in item.lower().replace("-", "").replace("_", "")
-                                for info in SDXL_MODELS.values()
-                            )
-                        except:
-                            pass
-                        
-                        if not is_curated:
-                            discovered.append({
-                                "id": model_id,
-                                "name": item,
-                                "description": "Custom Diffusers model",
-                                "version": "Custom",
-                                "type": "generation",
-                                "format": "diffusers",
-                                "source": "custom",
-                                "is_downloaded": True,
-                                "size_bytes": total_size,
-                                "file_path": item_path,
-                                "has_warning": False,
-                                "last_known_vram_mb": 6000
-                            })
+                        discovered.append({
+                            "id": model_id,
+                            "name": f"{display_name} [DIFFUSERS]",
+                            "description": "Custom Diffusers model",
+                            "version": "Custom",
+                            "type": model_type,
+                            "format": "diffusers",
+                            "source": "custom",
+                            "is_downloaded": True,
+                            "size_bytes": total_size,
+                            "file_path": item_path,
+                            "has_warning": False,
+                            "last_known_vram_mb": 6000
+                        })
         
         return discovered
     def _setup_routes(self):
