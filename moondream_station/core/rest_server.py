@@ -945,17 +945,19 @@ class RestServer:
         async def run_diagnostics():
             """Run all system diagnostics checks"""
             from moondream_station.core.system_diagnostics import SystemDiagnostician
-            diagnostician = SystemDiagnostician()
-            return diagnostician.run_all_checks(
+            config_root = os.path.expanduser("~/.moondream-station")
+            diagnostician = SystemDiagnostician(config_root)
+            return {"checks": diagnostician.run_all_checks(
                 nvidia_available=hw_monitor.nvidia_available,
                 memory_tracker=model_memory_tracker
-            )
+            )}
 
         @self.app.post("/diagnostics/fix/{fix_id}")
         async def fix_diagnostic(fix_id: str):
             """Execute a fix for a specific diagnostic issue"""
             from moondream_station.core.system_diagnostics import SystemDiagnostician
-            diagnostician = SystemDiagnostician()
+            config_root = os.path.expanduser("~/.moondream-station")
+            diagnostician = SystemDiagnostician(config_root)
             result = diagnostician.apply_fix(fix_id)
             if not result["success"]:
                 raise HTTPException(status_code=500, detail=result["message"])
