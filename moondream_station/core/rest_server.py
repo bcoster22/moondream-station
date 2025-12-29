@@ -363,6 +363,7 @@ class RestServer:
         )
         self.server = None
         self.server_thread = None
+        self.zombie_killer_task = None  # Background task for auto-free VRAM
         self._setup_routes()
 
     def _sse_event_generator(self, raw_generator):
@@ -1691,3 +1692,47 @@ class RestServer:
             and self.server
             and not self.server.should_exit
         )
+
+    async def _zombie_killer_worker(self):
+        """Background task that monitors for zombie VRAM and auto-frees it"""
+        import asyncio
+        otel = OtelMonitor()
+        
+        while True:
+            try:
+                # Wait for configured interval
+                interval = self.config.get("zombie_killer_interval", 60)
+                await asyncio.sleep(interval)
+                
+                # Check if feature is enabled
+                if not self.config.get("zombie_killer_enabled", False):
+                    continue
+                
+                # Get OTEL metrics
+                metrics = otel.get_metrics()
+                
+                # Check for ghost memory
+                if metrics.get("ghost_memory", {}).get("detected", False):
+                    ghost_vram = metrics["ghost_memory"].get("ghost_vram_mb", 0)
+                    print(f"[Zombie Killer] Detected {ghost_vram:.1f}MB zombie VRAM, auto-freeing...")
+                    
+                    # Unload model to free VRAM
+                    if self.inference_service.is_running():
+                        self.inference_service.stop()
+                        print("[Zombie Killer] Model unloaded successfully")
+                    else:
+                        print("[Zombie Killer] No model currently loaded")
+                        
+            except Exception as e:
+                print(f"[Zombie Killer] Error: {e}")
+
+    def start_zombie_killer(self):
+        """Start the zombie killer background task (called when server starts)"""
+        import asyncio
+        try:
+            loop = asyncio.get_running_loop()
+            if self.zombie_killer_task is None:
+                self.zombie_killer_task = loop.create_task(self._zombie_killer_worker())
+                print("[Zombie Killer] Background monitoring started")
+        except RuntimeError:
+            print("[Zombie Killer] Warning: No event loop running, task will start with server")
