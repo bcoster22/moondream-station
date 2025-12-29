@@ -847,6 +847,214 @@ class RestServer:
 
             return {"checks": checks, "overallStatus": "ok" if all_passed else "failed"}
 
+        @self.app.get("/diagnostics/scan")
+        async def run_diagnostics():
+            """Run all system diagnostics checks"""
+            from moondream_station.core.system_diagnostics import SystemDiagnostician
+            diagnostician = SystemDiagnostician()
+            return diagnostician.run_all_checks(
+                nvidia_available=hw_monitor.nvidia_available,
+                memory_tracker=model_memory_tracker
+            )
+
+        @self.app.post("/diagnostics/fix/{fix_id}")
+        async def fix_diagnostic(fix_id: str):
+            """Execute a fix for a specific diagnostic issue"""
+            from moondream_station.core.system_diagnostics import SystemDiagnostician
+            diagnostician = SystemDiagnostician()
+            result = diagnostician.apply_fix(fix_id)
+            if not result["success"]:
+                raise HTTPException(status_code=500, detail=result["message"])
+            return result
+
+        @self.app.get("/diagnostics/backend-health")
+        async def backend_health():
+            """Check if inference service is available and initialized"""
+            return {
+                "backend_imported": True,
+                "inference_service_running": self.inference_service.is_running(),
+                "status": "ready" if self.inference_service.is_running() else "stopped"
+            }
+
+        @self.app.post("/diagnostics/setup-autofix")
+        async def setup_autofix(request: Request):
+            """
+            Run the Auto Fix setup script with sudo password.
+            This configures passwordless sudo for the fix wrapper script.
+            """
+            import subprocess
+            import os
+            
+            try:
+                body = await request.json()
+                password = body.get("password", "")
+                
+                if not password:
+                    raise HTTPException(status_code=400, detail="Password required")
+                
+                # Path to setup script (adjustable)
+                script_path = "/home/bcoster/.moondream-station/moondream-station/setup_gpu_reset.sh"
+                
+                if not os.path.exists(script_path):
+                    raise HTTPException(status_code=500, detail=f"Setup script not found: {script_path}")
+                
+                # Execute with sudo -S (read password from stdin)
+                process = subprocess.Popen(
+                    ["sudo", "-S", "bash", script_path],
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True
+                )
+                
+                stdout, stderr = process.communicate(input=password + "\n", timeout=30)
+                
+                if process.returncode == 0:
+                    return {"success": True, "message": "Auto Fix setup completed successfully"}
+                else:
+                    if "Sorry, try again" in stderr or "authentication failure" in stderr.lower():
+                        raise HTTPException(status_code=401, detail="Incorrect password")
+                    raise HTTPException(status_code=500, detail=f"Setup failed: {stderr}")
+                    
+            except subprocess.TimeoutExpired:
+                raise HTTPException(status_code=504, detail="Setup script timed out")
+            except HTTPException:
+                raise
+            except Exception as e:
+                raise HTTPException(status_code=500, detail=str(e))
+
+        @self.app.get("/v1/samplers")
+        async def list_samplers():
+            """List available samplers"""
+            return {"samplers": ["euler", "euler_a", "dpm", "dpm++", "ddim", "pndm"]}
+
+        @self.app.get("/v1/schedulers")
+        async def list_schedulers():
+            """List available schedulers"""
+            return {"schedulers": ["euler", "euler_ancestral", "dpm_solver", "dpm_solver++", "ddim", "pndm", "lms"]}
+
+        @self.app.get("/v1/models/recommend")
+        async def recommend_models():
+            """Get recommended models for quick setup"""
+            return {
+                "recommended": [
+                    {"id": "moondream-2", "name": "Moondream 2", "type": "vision", "reason": "Fast, efficient vision model"},
+                    {"id": "sdxl-base", "name": "SDXL Base", "type": "generation", "reason": "High-quality image generation"}
+                ]
+            }
+
+        @self.app.get("/v1/models/sdxl")
+        async def list_sdxl_models():
+            """List SDXL-specific models"""
+            from moondream_station.core.rest_server import get_models
+            all_models = list(self.manifest_manager.get_models().values())
+            sdxl_models = [m for m in all_models if 'sdxl' in str(getattr(m, 'id', '')).lower()]
+            return {"models": sdxl_models}
+
+        @self.app.post("/v1/system/update-packages")
+        async def update_packages(request: Request):
+            """
+            Update specified npm packages.
+            """
+            import re
+            import subprocess
+            from fastapi.responses import JSONResponse
+            
+            try:
+                body = await request.json()
+                packages = body.get("packages", [])
+                
+                if not packages or not isinstance(packages, list):
+                    return JSONResponse(status_code=400, content={"status": "error", "message": "No packages specified"})
+
+                # Security: Validate package names (alphanumeric, -, @, /)
+                safe_packages = []
+                for pkg in packages:
+                    if re.match(r"^[@a-zA-Z0-9\-\/\.\^~]+$", pkg):
+                        safe_packages.append(pkg)
+                    else:
+                        print(f"Skipping invalid package name: {pkg}")
+                
+                if not safe_packages:
+                    return JSONResponse(status_code=400, content={"status": "error", "message": "No valid packages provided"})
+
+                # Construct command: npm install pkg1@latest pkg2@latest ...
+                cmd = ["npm", "install"] + [f"{pkg}@latest" for pkg in safe_packages]
+                
+                print(f"[System] Updating frontend packages: {' '.join(cmd)}")
+                
+                process = subprocess.run(
+                    cmd,
+                    capture_output=True,
+                    text=True,
+                    timeout=300  # 5 minutes
+                )
+                
+                if process.returncode == 0:
+                    return {"status": "success", "message": f"Successfully updated: {', '.join(safe_packages)}"}
+                else:
+                    return JSONResponse(status_code=500, content={
+                        "status": "error", 
+                        "message": "Update failed", 
+                        "details": process.stderr
+                    })
+                    
+            except Exception as e:
+                return JSONResponse(status_code=500, content={"status": "error", "message": str(e)})
+
+        @self.app.get("/v1/health")
+        async def health_v1():
+            """Health check endpoint (v1 alias)"""
+            return {"status": "ok", "server": "moondream-station"}
+
+        @self.app.post("/v1/system/gpu-boost")
+        async def gpu_boost(request: Request):
+            """Enable/disable GPU boost mode (max fans + persistence)"""
+            import subprocess
+            
+            try:
+                params = dict(request.query_params)
+                gpu_id = int(params.get("gpu_id", 0))
+                enable = params.get("enable", "true").lower() == "true"
+                
+                if enable:
+                    # Boost Mode: Max fans + Persistence
+                    commands = [
+                        ["sudo", "-n", "nvidia-smi", "-i", str(gpu_id), "-pm", "1"],  # Persistence mode ON
+                        ["sudo", "-n", "nvidia-smi", "-i", str(gpu_id), "-pl", "350"]  # Max power limit
+                    ]
+                    # Try to set fan speed if supported
+                    try:
+                        subprocess.run(["sudo", "-n", "nvidia-settings", "-a", f"[gpu:{gpu_id}]/GPUFanControlState=1"], timeout=5)
+                        subprocess.run(["sudo", "-n", "nvidia-settings", "-a", f"[fan:{gpu_id}]/GPUTargetFanSpeed=100"], timeout=5)
+                    except:
+                        pass  # Fan control not always supported
+                else:
+                    # Normal Mode: Auto fans + Default settings
+                    commands = [
+                        ["sudo", "-n", "nvidia-smi", "-i", str(gpu_id), "-pm", "0"],  # Persistence mode OFF
+                        ["sudo", "-n", "nvidia-smi", "-i", str(gpu_id), "-pl", "250"]  # Default power limit
+                    ]
+                    # Reset fan to auto
+                    try:
+                        subprocess.run(["sudo", "-n", "nvidia-settings", "-a", f"[gpu:{gpu_id}]/GPUFanControlState=0"], timeout=5)
+                    except:
+                        pass
+                
+                # Execute commands
+                for cmd in commands:
+                    result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+                    if result.returncode != 0 and "password is required" in result.stderr:
+                        raise HTTPException(status_code=403, detail="Permission denied. Passwordless sudo required.")
+                
+                mode = "Boost" if enable else "Normal"
+                return {"status": "success", "message": f"GPU {gpu_id} set to {mode} mode"}
+                
+            except HTTPException:
+                raise
+            except Exception as e:
+                raise HTTPException(status_code=500, detail=str(e))
+
         @self.app.post("/v1/vision/batch-caption")
         async def batch_caption(request: Request):
             """
