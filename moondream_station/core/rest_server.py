@@ -1460,49 +1460,7 @@ class RestServer:
                     
                     all_models.append(m)
                 
-                # 2. Curated SDXL Models (Generation)
-                try:
-                    from moondream_station.config import SDXL_MODELS
-                    for model_id, model_info in SDXL_MODELS.items():
-                        # Detect if downloaded and format
-                        is_downloaded = False
-                        size_bytes = 0
-                        detected_format = None
-                        
-                        try:
-                            if sdxl_backend_new:
-                                is_downloaded = sdxl_backend_new.is_model_downloaded(model_info.get("hf_id"))
-                                if hasattr(sdxl_backend_new, "get_model_file_details"):
-                                    file_path, size_bytes = sdxl_backend_new.get_model_file_details(model_info.get("hf_id"))
-                                    if file_path:
-                                        if os.path.isdir(file_path) and os.path.exists(os.path.join(file_path, "model_index.json")):
-                                            detected_format = "diffusers"
-                                        elif os.path.isfile(file_path):
-                                            ext = os.path.splitext(file_path)[1].lower()
-                                            detected_format = ext.replace(".", "")
-                        except: pass
-                        
-                        # Add format badge to display name
-                        display_name = model_info["name"]
-                        if detected_format:
-                            display_name = f"{display_name} [{detected_format.upper()}]"
-                        
-                        all_models.append({
-                            "id": model_id,
-                            "name": display_name,
-                            "description": model_info["description"],
-                            "version": "SDXL",
-                            "last_known_vram_mb": model_memory_tracker.get_last_known_vram(model_id) or 6000,
-                            "type": "generation",
-                            "source": "curated",
-                            "is_downloaded": is_downloaded,
-                            "size_bytes": size_bytes,
-                            "format": detected_format,
-                            "has_warning": False
-                        })
-                except: pass
-                
-                # 3. Auto-discovered Custom Models
+                # 2. Auto-discovered Custom Models (all models from filesystem)
                 discovered = self._discover_models_from_directories()
                 all_models.extend(discovered)
                 
