@@ -712,6 +712,98 @@ class RestServer:
                 import traceback
                 traceback.print_exc()
                 return JSONResponse(content={"error": str(e)}, status_code=500)
+        
+        @self.app.post("/diagnostics/vram-test")
+        async def vram_test(request: Request):
+            """
+            Test VRAM usage with different batch sizes for WD14 tagging.
+            Request: { "batch_sizes": [4, 8, 16, 32, 64] }
+            Response: [{ "batchSize": 4, "vramPercent": 45.2, "duration": 1.23 }, ...]
+            """
+            try:
+                data = await request.json()
+                batch_sizes = data.get("batch_sizes", [4, 8, 16, 32])
+                
+                # Ensure WD14 model is loaded
+                current_model = self.config.get("current_model")
+                if not current_model or "wd14" not in current_model.lower():
+                    # Switch to WD14
+                    if not self.inference_service.start("wd14-vit-v2"):
+                        return JSONResponse(content={"error": "Failed to load WD14 model"}, status_code=500)
+                    self.config.set("current_model", "wd14-vit-v2")
+                
+                results = []
+                
+                # Create dummy test images (simple colored squares)
+                from PIL import Image
+                import io
+                import base64
+                
+                for batch_size in batch_sizes:
+                    # Generate dummy images
+                    dummy_images = []
+                    for i in range(batch_size):
+                        img = Image.new('RGB', (224, 224), color=(128 + i*2, 64, 192))
+                        dummy_images.append(img)
+                    
+                    # Get VRAM before
+                    try:
+                        import torch
+                        if torch.cuda.is_available():
+                            torch.cuda.empty_cache()
+                            vram_before = torch.cuda.memory_allocated() / 1024 / 1024 / 1024  # GB
+                    except:
+                        vram_before = 0
+                    
+                    # Process batch
+                    import time
+                    start_time = time.time()
+                    
+                    try:
+                        result = await self.inference_service.execute_function(
+                            "caption", 
+                            image=dummy_images,
+                            timeout=30.0
+                        )
+                        duration = time.time() - start_time
+                        
+                        # Get VRAM after
+                        try:
+                            import torch
+                            if torch.cuda.is_available():
+                                vram_after = torch.cuda.memory_allocated() / 1024 / 1024 / 1024  # GB
+                                vram_total = torch.cuda.get_device_properties(0).total_memory / 1024 / 1024 / 1024  # Total GB
+                                vram_percent = (vram_after / vram_total) * 100
+                        except:
+                            vram_percent = 0
+                        
+                        results.append({
+                            "batchSize": batch_size,
+                            "vramPercent": round(vram_percent, 1),
+                            "vramGB": round(vram_after, 2),
+                            "duration": round(duration, 3),
+                            "success": True
+                        })
+                        
+                    except Exception as e:
+                        results.append({
+                            "batchSize": batch_size,
+                            "vramPercent": 100,
+                            "vramGB": 0,
+                            "duration": 0,
+                            "success": False,
+                            "error": str(e)
+                        })
+                        # If we hit OOM, stop testing larger batches
+                        if "out of memory" in str(e).lower():
+                            break
+                
+                return {"results": results}
+                
+            except Exception as e:
+                import traceback
+                traceback.print_exc()
+                return JSONResponse(content={"error": str(e)}, status_code=500)
 
         @self.app.post("/v1/generate")
         async def generate_image(request: Request):
