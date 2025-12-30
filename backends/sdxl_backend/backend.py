@@ -3,7 +3,7 @@ import torch
 import base64
 import io
 from PIL import Image
-from diffusers import AutoPipelineForText2Image, AutoPipelineForImage2Image, EulerDiscreteScheduler, PipelineQuantizationConfig, AutoencoderKL
+from diffusers import AutoPipelineForText2Image, AutoPipelineForImage2Image, EulerDiscreteScheduler, PipelineQuantizationConfig, AutoencoderKL, StableDiffusionXLPipeline
 import logging
 
 # Global instance
@@ -39,12 +39,21 @@ class SDXLBackend:
                     }
                 )
 
-            self.pipeline = AutoPipelineForText2Image.from_pretrained(
-                self.model_id,
-                torch_dtype=torch.float16,
-                quantization_config=quantization_config,
-                cache_dir=os.path.join(self._models_dir, "models")
-            )
+            if self.model_id.endswith((".safetensors", ".ckpt", ".bin", ".pt")):
+                 self.logger.info(f"Detected single-file checkpoint. Using StableDiffusionXLPipeline.from_single_file...")
+                 self.pipeline = StableDiffusionXLPipeline.from_single_file(
+                    self.model_id,
+                    torch_dtype=torch.float16,
+                    quantization_config=quantization_config,
+                    cache_dir=os.path.join(self._models_dir, "models")
+                 )
+            else:
+                self.pipeline = AutoPipelineForText2Image.from_pretrained(
+                    self.model_id,
+                    torch_dtype=torch.float16,
+                    quantization_config=quantization_config,
+                    cache_dir=os.path.join(self._models_dir, "models")
+                )
 
             self.pipeline.scheduler = EulerDiscreteScheduler.from_config(
                 self.pipeline.scheduler.config, 

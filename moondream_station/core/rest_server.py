@@ -26,10 +26,68 @@ try:
                     "sdxl-anime": "cagliostrolab/animagine-xl-3.1",
                     "sdxl-surreal": "Lykon/dreamshaper-xl-lightning"
                 }
-                hf_model = model_mapping.get(model_id, model_id)
+                # Local Model Resolution Logic
+                if model_id.startswith("diffusers/"):
+                    # Resolve to local diffusers directory
+                    models_dir = os.environ.get("MOONDREAM_MODELS_DIR", os.path.expanduser("~/.moondream-station/models"))
+                    model_path = os.path.join(models_dir, model_id)
+                    if os.path.exists(model_path):
+                        print(f"[SDXL] Resolved local Diffusers model: {model_path}")
+                        hf_model = model_path
+                    else:
+                        print(f"[SDXL] Warning: Local model {model_id} not found at {model_path}")
+                        hf_model = model_id # Fallback
+                
+                elif model_id.startswith("checkpoint/"):
+                     # Resolve to local checkpoint file
+                    models_dir = os.environ.get("MOONDREAM_MODELS_DIR", os.path.expanduser("~/.moondream-station/models"))
+                    # Need to find the actual file since ID lacks extension
+                    import glob
+                    # logic: models/checkpoints/{name}.*
+                    ckpt_name = model_id.replace("checkpoint/", "")
+                    search_pattern = os.path.join(models_dir, "checkpoints", f"{ckpt_name}.*")
+                    matches = glob.glob(search_pattern)
+                    
+                    found_ckpt = None
+                    for m in matches:
+                        if m.endswith((".safetensors", ".ckpt", ".bin", ".pt")):
+                            found_ckpt = m
+                            break
+                    
+                    if found_ckpt:
+                         print(f"[SDXL] Resolved local Checkpoint: {found_ckpt}")
+                         hf_model = found_ckpt
+                    else:
+                         print(f"[SDXL] Warning: Local checkpoint {model_id} not found")
+                         hf_model = model_id
+
+                elif model_id.startswith("hf/"):
+                     # HuggingFace Cache ID (e.g. hf/stabilityai/sdxl-turbo) -> hf/ is just a UI tag, real ID is rest
+                     # But actually, backend expects repo ID for HF. 
+                     # However, if we want to ensure offline, we might want to resolve to snapshot path if possible.
+                     # For now, stripping 'hf/' prefix is enough to let diffusers find it in cache by repo ID.
+                     hf_model = model_id.replace("hf/", "")
+                     print(f"[SDXL] Resolved HF Cache Model ID: {hf_model}")
+
+                else:
+                    hf_model = model_mapping.get(model_id, model_id)
                 
                 # Create or reinitialize if model changed
                 if self._instance is None or self._current_model != hf_model:
+                    # Unload previous instance if it exists to free VRAM
+                    if self._instance is not None:
+                        print(f"[SDXL] Unloading previous model {self._current_model} before loading {hf_model}...")
+                        try:
+                            # Manually trigger garbage collection and cache clearing
+                            self._instance.pipeline = None
+                            import torch
+                            import gc
+                            gc.collect()
+                            if torch.cuda.is_available():
+                                torch.cuda.empty_cache()
+                        except Exception as cleanup_err:
+                            print(f"[SDXL] Warning during cleanup: {cleanup_err}")
+
                     config = {
                         "model_id": hf_model,
                         "use_4bit": use_4bit,
@@ -50,7 +108,7 @@ try:
                 traceback.print_exc()
                 return False
         
-        def generate(self, prompt, width=1024, height=1024, steps=8, image=None, strength=0.75):
+        def generate(self, prompt, width=1024, height=1024, steps=8, image=None, strength=0.75, scheduler="euler"):
             """Generate image using SDXL backend"""
             if self._instance is None or self._instance.pipeline is None:
                 raise RuntimeError("SDXL backend not initialized")
@@ -64,7 +122,8 @@ try:
                         height=height,
                         num_inference_steps=steps,
                         init_image_b64=image,
-                        strength=strength
+                        strength=strength,
+                        scheduler=scheduler
                     )
                 else:
                     # Fallback to direct pipeline call
@@ -396,6 +455,7 @@ class RestServer:
         """
         import glob
         from pathlib import Path
+        import os
         
         discovered = []
         models_dir = os.environ.get("MOONDREAM_MODELS_DIR", os.path.expanduser("~/.moondream-station/models"))
@@ -413,14 +473,13 @@ class RestServer:
             else:
                 # Default to generation for diffusers/checkpoints
                 return "generation"
-        
+
         # 1. Scan analysis/ directory for WD14 and other taggers
         analysis_dir = os.path.join(models_dir, "analysis")
         if os.path.exists(analysis_dir):
             for item in os.listdir(analysis_dir):
                 item_path = os.path.join(analysis_dir, item)
                 if os.path.isdir(item_path):
-                    # Check if it's a valid model directory (has config files)
                     has_config = any(os.path.exists(os.path.join(item_path, f)) 
                                     for f in ["config.json", "model_index.json", "preprocessor_config.json"])
                     if has_config:
@@ -482,101 +541,96 @@ class RestServer:
                 if item.startswith("models--") and not item.startswith("."):
                     item_path = os.path.join(hf_models_dir, item)
                     if os.path.isdir(item_path):
-                        # Extract model name from "models--org--model" format
                         model_name = item.replace("models--", "").replace("--", "/")
                         display_name = model_name.split("/")[-1].replace("-", " ").title()
                         
-                        # Look for snapshots directory
                         snapshots_dir = os.path.join(item_path, "snapshots")
                         if os.path.exists(snapshots_dir):
                             snapshots = [d for d in os.listdir(snapshots_dir) if os.path.isdir(os.path.join(snapshots_dir, d))]
                             if snapshots:
-                                latest_snapshot = os.path.join(snapshots_dir, snapshots[0])
+                                real_path = os.path.join(snapshots_dir, snapshots[0])
+                                total_size = sum(
+                                    os.path.getsize(os.path.join(dirpath, filename))
+                                    for dirpath, dirnames, filenames in os.walk(real_path)
+                                    for filename in filenames
+                                )
                                 
-                                # Check if it's a diffusers model
-                                is_diffusers = os.path.exists(os.path.join(latest_snapshot, "model_index.json"))
+                                m_type = categorize_model(item_path, model_name)
                                 
-                                if is_diffusers:
-                                    total_size = sum(
-                                        os.path.getsize(os.path.join(dirpath, filename))
-                                        for dirpath, dirnames, filenames in os.walk(item_path)
-                                        for filename in filenames
-                                    )
-                                    
-                                    model_type = categorize_model(latest_snapshot, model_name)
-                                    
-                                    discovered.append({
-                                        "id": f"hf/{model_name}",
-                                        "name": f"{display_name} [DIFFUSERS]",
-                                        "description": f"Diffusers model from HuggingFace",
-                                        "version": "HF Cache",
-                                        "type": model_type,
-                                        "format": "diffusers",
-                                        "source": "custom",
-                                        "is_downloaded": True,
-                                        "size_bytes": total_size,
-                                        "file_path": latest_snapshot,
-                                        "has_warning": False,
-                                        "last_known_vram_mb": 6000
-                                    })
-        
-        # 4. Scan checkpoints/ directory for single-file models
-        checkpoints_dir = os.path.join(models_dir, "checkpoints")
-        if os.path.exists(checkpoints_dir):
-            for ext in ["*.safetensors", "*.ckpt", "*.bin", "*.pt"]:
-                for filepath in glob.glob(os.path.join(checkpoints_dir, ext)):
-                    filename = os.path.basename(filepath)
-                    name_without_ext = os.path.splitext(filename)[0]
-                    file_format = os.path.splitext(filename)[1].replace(".", "")
-                    file_size = os.path.getsize(filepath)
-                    
-                    model_id = f"checkpoint/{name_without_ext}"
-                    model_type = categorize_model(filepath, name_without_ext)
-                    
-                    discovered.append({
-                        "id": model_id,
-                        "name": f"{name_without_ext} [{file_format.upper()}]",
-                        "description": f"Custom {file_format.upper()} checkpoint",
-                        "version": "Custom",
-                        "type": model_type,
-                        "format": file_format,
-                        "source": "custom",
-                        "is_downloaded": True,
-                        "size_bytes": file_size,
-                        "file_path": filepath,
-                        "has_warning": file_format in ["ckpt", "bin"],  # Pickle-based formats
-                        "last_known_vram_mb": 6000
-                    })
-        
-        # 5. Scan diffusers/ directory for folder-based models
+                                discovered.append({
+                                    "id": model_name,
+                                    "name": display_name,
+                                    "description": f"HuggingFace model: {model_name}",
+                                    "version": "HF Cache",
+                                    "type": m_type,
+                                    "format": "transformers",
+                                    "source": "huggingface",
+                                    "is_downloaded": True,
+                                    "size_bytes": total_size,
+                                    "file_path": real_path,
+                                    "has_warning": False,
+                                    "last_known_vram_mb": 4000
+                                })
+
+        # 4. Scan diffusers/ directory for Diffusers models (recursive)
         diffusers_dir = os.path.join(models_dir, "diffusers")
         if os.path.exists(diffusers_dir):
-            for item in os.listdir(diffusers_dir):
-                item_path = os.path.join(diffusers_dir, item)
-                if os.path.isdir(item_path):
-                    model_index = os.path.join(item_path, "model_index.json")
-                    if os.path.exists(model_index):
-                        total_size = sum(
-                            os.path.getsize(os.path.join(dirpath, filename))
-                            for dirpath, dirnames, filenames in os.walk(item_path)
-                            for filename in filenames
-                        )
+            for root, dirs, files in os.walk(diffusers_dir):
+                if "model_index.json" in files:
+                    model_path = root
+                    relative_path = os.path.relpath(model_path, diffusers_dir)
+                    model_name = os.path.basename(model_path).replace("-", " ").title()
+                    
+                    # Prevent recursing into this model directory
+                    dirs[:] = []
+                    
+                    total_size = sum(
+                        os.path.getsize(os.path.join(dirpath, filename))
+                        for dirpath, _, filenames in os.walk(model_path)
+                        for filename in filenames
+                    )
+
+                    discovered.append({
+                        "id": f"diffusers/{relative_path}",
+                        "name": f"{model_name} (Diffusers)",
+                        "description": "Local Diffusers model",
+                        "version": "Local",
+                        "type": "generation",
+                        "format": "diffusers",
+                        "source": "local",
+                        "is_downloaded": True,
+                        "size_bytes": total_size,
+                        "file_path": model_path,
+                        "has_warning": False,
+                        "last_known_vram_mb": 6000
+                    })
+
+        # 5. Scan checkpoints/ directory for Single File models (recursive)
+        checkpoints_dir = os.path.join(models_dir, "checkpoints")
+        if os.path.exists(checkpoints_dir):
+            for root, _, files in os.walk(checkpoints_dir):
+                for file in files:
+                    if file.lower().endswith(('.safetensors', '.ckpt', '.pt', '.bin')):
+                        model_path = os.path.join(root, file)
+                        relative_path = os.path.relpath(model_path, checkpoints_dir)
+                        model_name = os.path.splitext(file)[0].replace("-", " ").title()
                         
-                        model_id = f"diffusers/{item}"
-                        display_name = item.replace("-", " ").title()
-                        model_type = categorize_model(item_path, item)
-                        
+                        file_size = os.path.getsize(model_path)
+                        # Heuristic: Ignore small files
+                        if file_size < 100 * 1024 * 1024:
+                            continue
+
                         discovered.append({
-                            "id": model_id,
-                            "name": f"{display_name} [DIFFUSERS]",
-                            "description": "Custom Diffusers model",
-                            "version": "Custom",
-                            "type": model_type,
-                            "format": "diffusers",
-                            "source": "custom",
+                            "id": f"checkpoints/{relative_path}",
+                            "name": f"{model_name} (Checkpoint)",
+                            "description": "Local Checkpoint Single File",
+                            "version": "Local",
+                            "type": "generation",
+                            "format": "single_file",
+                            "source": "local",
                             "is_downloaded": True,
-                            "size_bytes": total_size,
-                            "file_path": item_path,
+                            "size_bytes": file_size,
+                            "file_path": model_path,
                             "has_warning": False,
                             "last_known_vram_mb": 6000
                         })
@@ -783,10 +837,12 @@ class RestServer:
             versions = {}
             for lib in libs:
                 try:
-                    versions[lib] = importlib.metadata.version(lib)
+                    version_str = importlib.metadata.version(lib)
                 except importlib.metadata.PackageNotFoundError:
-                    versions[lib] = "Not Installed"
-
+                    version_str = "Not Installed"
+                
+                versions[lib] = version_str
+                
             # Check for critical vulnerability CVE-2025-32434
             current_torch = versions.get('torch', '0.0.0').split('+')[0]
             has_critical_update = False
@@ -1347,9 +1403,91 @@ class RestServer:
                         print(f"[VRAM] Unloading Moondream for SDXL generation ({vram_mode} mode)...")
                         self.inference_service.unload_model()
 
-                # Init Backend
+                # Resolve Model Path to Local File
+                target_model_id = data.get("model", "sdxl-realism")
+                resolved_model_path = target_model_id # Default to ID if all else fails
+                
+                try:
+                    found = False
+                    if hasattr(self, "scan_models"):
+                        available_models = self.scan_models()
+                        # Strategy 1: Exact Match
+                        for m in available_models:
+                            if m.get("id") == target_model_id and m.get("file_path"):
+                                resolved_model_path = m["file_path"]
+                                found = True
+                                print(f"[SDXL] Resolved {target_model_id} (Exact) to: {resolved_model_path}")
+                                break
+                        
+                        # Strategy 2: Fuzzy Match (if ID is part of the name or file path)
+                        if not found:
+                            for m in available_models:
+                                if (target_model_id in m.get("id", "") or target_model_id in m.get("name", "")) and m.get("file_path"):
+                                    resolved_model_path = m["file_path"]
+                                    found = True
+                                    print(f"[SDXL] Resolved {target_model_id} (Fuzzy) to: {resolved_model_path}")
+                                    break
+
+                    # Strategy 3: Manual HuggingFace Cache Construction (Offline Fail-safe)
+                    if not found and "/" in target_model_id:
+                        # Construct expected HF cache path: models--User--Repo
+                        # e.g. hf/Lykon/dreamshaper-xl-lightning -> models--Lykon--dreamshaper-xl-lightning
+                        parts = target_model_id.replace("hf/", "").split("/")
+                        if len(parts) >= 2:
+                            user_name = parts[0]
+                            repo_name = parts[1]
+                            hf_folder = f"models--{user_name}--{repo_name}"
+                            
+                            # Determine models directory (Go up 4 levels to .moondream-station root)
+                            base_models_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(__file__)))), 'models', 'models')
+                            expected_path = os.path.join(base_models_dir, hf_folder, "snapshots")
+                            
+                            if os.path.exists(expected_path):
+                                # Find latest snapshot (hash folder)
+                                snapshots = [os.path.join(expected_path, d) for d in os.listdir(expected_path) if os.path.isdir(os.path.join(expected_path, d))]
+                                if snapshots:
+                                    # Sort by modification time to get latest? Or just pick first.
+                                    latest_snapshot = max(snapshots, key=os.path.getmtime)
+                                    resolved_model_path = latest_snapshot
+                                    found = True
+                                    print(f"[SDXL] Resolved {target_model_id} (Manual HF) to: {resolved_model_path}")
+                                else:
+                                    print(f"[SDXL] Found {hf_folder} but no snapshots.")
+                            else:
+                                print(f"[SDXL] Manual path verify failed: {expected_path} does not exist")
+
+                    # Strategy 4: Manual Checkpoint Resolution (Offline Fail-safe)
+                    if not found and target_model_id.startswith("checkpoint/"):
+                        # Extract filename part
+                        filename_part = target_model_id.replace("checkpoint/", "")
+                        # Go up 4 levels to .moondream-station root
+                        models_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(__file__)))), 'models', 'checkpoints')
+                        
+                        # Try common extensions
+                        for ext in [".safetensors", ".ckpt", ".bin", ".pt"]:
+                            possible_path = os.path.join(models_dir, f"{filename_part}{ext}")
+                            if os.path.exists(possible_path):
+                                resolved_model_path = possible_path
+                                found = True
+                                print(f"[SDXL] Resolved {target_model_id} (Manual Checkpoint) to: {resolved_model_path}")
+                                break
+                        
+                        if not found:
+                             print(f"[SDXL] Manual checkpoint verify failed for {filename_part} in {models_dir}")
+
+                    if not found:
+                        print(f"[SDXL] Warning: Could not resolve {target_model_id}. Attempts failed.")
+                        # Debug: Print available
+                        ids = [m.get("id") for m in available_models] if 'available_models' in locals() else []
+                        print(f"[SDXL] Available IDs: {ids}")
+
+                except Exception as e:
+                    print(f"[SDXL] Error during resolution: {e}")
+
+
+                # Init Backend with Resolved Path
                 success = sdxl_backend_new.init_backend(
-                    model_id=data.get("model", "sdxl-realism"),
+                    model_id=resolved_model_path,
                     use_4bit=True
                 )
                 if not success:
