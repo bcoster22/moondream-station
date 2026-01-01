@@ -889,11 +889,7 @@ class RestServer:
             except Exception as e:
                 return {"error": str(e)}
 
-        @self.app.get("/v1/models")
-        async def list_models():
-            """List all available models"""
-            discovered = self._discover_models_from_directories()
-            return {"data": discovered}
+
 
         @self.app.post("/v1/tools/convert")
         async def convert_model(request: Request):
@@ -1829,8 +1825,9 @@ class RestServer:
             if not model_id:
                 raise HTTPException(status_code=400, detail="model is required")
             
-            if model_id not in self.manifest_manager.get_models():
-                raise HTTPException(status_code=404, detail="Model not found")
+            # Allow dynamic models (e.g. diffusers/...) to be passed through
+            # if model_id not in self.manifest_manager.get_models():
+            #    raise HTTPException(status_code=404, detail="Model not found")
                 
             success = self.inference_service.start(model_id)
             if success:

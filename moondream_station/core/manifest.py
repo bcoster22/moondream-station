@@ -409,12 +409,46 @@ class ManifestManager:
             return None
 
     def get_worker_backends(self, model_id: str, n_workers: int) -> List[Any]:
-        if not self._manifest or model_id not in self._manifest.models:
+        if not self._manifest:
             return []
+            
+        # DYNAMIC MODEL HANDLING
+        if model_id not in self._manifest.models:
+            # Check if it looks like a generation model
+            is_gen = (
+                model_id.startswith("diffusers/") or 
+                model_id.startswith("checkpoints/") or 
+                "animagine" in model_id.lower() or
+                "xl" in model_id.lower()
+            )
+            
+            if is_gen:
+                print(f"[Manifest] Auto-mapping dynamic model '{model_id}' to 'sdxl_backend'")
+                backend_id = "sdxl_backend"
+                model_args = {"model_id": model_id}
+            elif "moondream" in model_id.lower():
+                print(f"[Manifest] Auto-mapping dynamic model '{model_id}' to 'moondream_backend'")
+                backend_id = "moondream_backend"
+                model_args = {"model_id": model_id}
+            elif "joy-caption" in model_id.lower() or "joycaption" in model_id.lower():
+                print(f"[Manifest] Auto-mapping dynamic model '{model_id}' to 'joycaption_backend'")
+                backend_id = "joycaption_backend"
+                model_args = {"model_id": model_id}
+            elif "wd14" in model_id.lower() or "tagger" in model_id.lower():
+                print(f"[Manifest] Auto-mapping dynamic model '{model_id}' to 'wd14_backend'")
+                backend_id = "wd14_backend"
+                model_args = {"model_id": model_id} 
+            elif "florence" in model_id.lower():
+                print(f"[Manifest] Auto-mapping dynamic model '{model_id}' to 'florence2_backend'")
+                backend_id = "florence2_backend"
+                model_args = {"model_id": model_id}
+            else:
+                 return []
+        else:
+            model_info = self._manifest.models[model_id]
+            backend_id = model_info.backend
+            model_args = model_info.args
 
-        model_info = self._manifest.models[model_id]
-        backend_id = model_info.backend
-        model_args = model_info.args
         cache_key = f"{model_id}_{n_workers}"
 
         if cache_key in self._worker_backends:
