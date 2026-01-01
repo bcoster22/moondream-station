@@ -28,8 +28,16 @@ def main():
         if not os.path.exists(manifest_path):
              logger.error(f"Manifest not found at {manifest_path}")
              sys.exit(1)
-             
+            
         logger.info(f"Loading manifest from {manifest_path}")
+        
+        # --- DEV MODE OPTIMIZATIONS ---
+        if config.get("dev_mode", False):
+            import torch
+            logger.warning("DEV MODE ENABLED: Disabling torch.compile for faster startup and lower memory.")
+            # Monkey-patch torch.compile to be a no-op (Eager Mode)
+            torch.compile = lambda model, **kwargs: model
+        
         manifest_manager = ManifestManager(config)
         manifest_manager.load_manifest(manifest_path)
         

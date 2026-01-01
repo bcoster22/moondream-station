@@ -112,11 +112,16 @@ class InferenceService:
         stats["status"] = "running"
         return stats
 
+        return True
+
     def unload_model(self):
+        print("[InferenceService] Unloading model...")
         if self.worker_pool:
+            print("[InferenceService] Shutting down worker pool...")
             self.worker_pool.shutdown()
             self.worker_pool = None
         
+        print("[InferenceService] Unloading backends from manifest...")
         self.manifest_manager.unload_all_backends()
         self.current_model = None
         
@@ -126,6 +131,44 @@ class InferenceService:
         
         # Force Python Garbage Collection
         gc.collect()
+        
+        # Reset Dynamo/Inductor to clear workers
+        try:
+            if hasattr(torch, "_dynamo") and hasattr(torch._dynamo, "reset"):
+                print("[InferenceService] Resetting torch._dynamo...")
+                torch._dynamo.reset()
+        except Exception as e:
+            print(f"[InferenceService] Failed to reset dynamo: {e}")
+
+        # AGGRESSIVE CLEANUP: Kill child workers (compile workers)
+        try:
+            import psutil
+            import os
+            import signal
+            
+            parent = psutil.Process()
+            children = parent.children(recursive=True)
+            
+            if children:
+                print(f"[InferenceService] Found {len(children)} child processes. Terminating...")
+                for child in children:
+                    try:
+                        # Skip if it's not a python process or looks critical
+                        if child.pid == os.getpid(): continue
+                        
+                        print(f"[InferenceService] Killing worker/child PID: {child.pid}")
+                        child.terminate()
+                    except (psutil.NoSuchProcess, psutil.AccessDenied):
+                        pass
+                
+                # Wait for termination
+                _, alive = psutil.wait_procs(children, timeout=3)
+                for p in alive:
+                     print(f"[InferenceService] Force killing PID: {p.pid}")
+                     p.kill()
+                     
+        except Exception as e:
+            print(f"[InferenceService] Error killing child processes: {e}")
         
         # Force CUDA Cache Clear
         try:

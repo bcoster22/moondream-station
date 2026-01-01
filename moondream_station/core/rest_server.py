@@ -206,13 +206,31 @@ class HardwareMonitor:
         elif os.environ.get("VIRTUAL_ENV"):
             execution_type = "Venv"
 
+        # Calculate process memory (including children)
+        process_memory_mb = 0
+        try:
+            process = psutil.Process()
+            total_rss = process.memory_info().rss
+            
+            # Sum up memory of all child processes (e.g. workers)
+            for child in process.children(recursive=True):
+                try:
+                    total_rss += child.memory_info().rss
+                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                    pass
+                    
+            process_memory_mb = total_rss / (1024 * 1024)
+        except:
+            pass
+
         status = {
             "platform": "CPU",
             "accelerator_available": False,
             "torch_version": torch.__version__,
             "cuda_version": getattr(torch.version, 'cuda', 'Unknown'),
             "hip_version": getattr(torch.version, 'hip', None),
-            "execution_type": execution_type
+            "execution_type": execution_type,
+            "process_memory_mb": process_memory_mb
         }
         
         if torch.cuda.is_available():
@@ -457,8 +475,15 @@ class RestServer:
         from pathlib import Path
         import os
         
+        
         discovered = []
-        models_dir = os.environ.get("MOONDREAM_MODELS_DIR", os.path.expanduser("~/.moondream-station/models"))
+        # Use config models dir for consistency with generation logic
+        models_dir = self.config.get("models_dir")
+        if not models_dir:
+             models_dir = os.environ.get("MOONDREAM_MODELS_DIR", os.path.expanduser("~/.moondream-station/models"))
+        
+        print(f"DEBUG: Discovering models in {models_dir}")
+
         
         # Helper function to categorize models by directory and name
         def categorize_model(path, name):
@@ -494,7 +519,7 @@ class RestServer:
                             "name": item.replace("-", " ").replace("_", " ").title(),
                             "description": "Image tagging and analysis model",
                             "version": "Custom",
-                            "type": "analysis",
+                            "type": "tagging",
                             "format": "transformers",
                             "source": "custom",
                             "is_downloaded": True,
@@ -519,12 +544,14 @@ class RestServer:
                             for filename in filenames
                         )
                         
+                        m_type = "captioning" if "caption" in item.lower() else "vision"
+
                         discovered.append({
                             "id": f"vision/{item}",
                             "name": item.replace("-", " ").replace("_", " ").title(),
                             "description": "Vision-language model for image understanding",
                             "version": "Custom",
-                            "type": "vision",
+                            "type": m_type,
                             "format": "transformers",
                             "source": "custom",
                             "is_downloaded": True,
@@ -556,6 +583,9 @@ class RestServer:
                                 )
                                 
                                 m_type = categorize_model(item_path, model_name)
+                                # Alignment fix
+                                if m_type == "analysis": m_type = "tagging"
+                                # We can refine vision vs captioning here too if needed, but categorize_model is basic.
                                 
                                 discovered.append({
                                     "id": model_name,
@@ -575,25 +605,52 @@ class RestServer:
         # 4. Scan diffusers/ directory for Diffusers models (recursive)
         diffusers_dir = os.path.join(models_dir, "diffusers")
         if os.path.exists(diffusers_dir):
+            # Limit recursion depth to avoid scanning too deep (e.g. only 3 levels)
+            max_depth = 3
+            initial_depth = diffusers_dir.rstrip(os.path.sep).count(os.path.sep)
+            
             for root, dirs, files in os.walk(diffusers_dir):
+                current_depth = root.count(os.path.sep)
+                if current_depth - initial_depth > max_depth:
+                    continue
+                    
                 if "model_index.json" in files:
                     model_path = root
-                    relative_path = os.path.relpath(model_path, diffusers_dir)
-                    model_name = os.path.basename(model_path).replace("-", " ").title()
+                    # If inside snapshots/HASH, we want a cleaner ID
+                    # e.g. diffusers/albedobase-xl/snapshots/HASH -> diffusers/albedobase-xl
                     
-                    # Prevent recursing into this model directory
-                    dirs[:] = []
+                    # Try to deduce a clean ID from the path relative to diffusers_dir
+                    rel_path = os.path.relpath(model_path, diffusers_dir)
+                    parts = rel_path.split(os.sep)
+                    
+                    # Simplify ID: if it contains 'snapshots', take the part before it
+                    if "snapshots" in parts:
+                        idx = parts.index("snapshots")
+                        if idx > 0:
+                            clean_id = "/".join(parts[:idx])
+                        else:
+                            clean_id = rel_path
+                    else:
+                        clean_id = rel_path
+                        
+                    model_id = f"diffusers/{clean_id}"
+                    
+                    # Avoid duplicates if multiple snapshots exist (pick one, usually walk visits in order)
+                    if any(m["id"] == model_id for m in discovered):
+                        continue
+
+                    model_name = clean_id.split("/")[-1].replace("-", " ").title()
                     
                     total_size = sum(
                         os.path.getsize(os.path.join(dirpath, filename))
-                        for dirpath, _, filenames in os.walk(model_path)
+                        for dirpath, dirnames, filenames in os.walk(model_path)
                         for filename in filenames
                     )
-
+                    
                     discovered.append({
-                        "id": f"diffusers/{relative_path}",
-                        "name": f"{model_name} (Diffusers)",
-                        "description": "Local Diffusers model",
+                        "id": model_id,
+                        "name": model_name,
+                        "description": "Diffusers Model (Folder)",
                         "version": "Local",
                         "type": "generation",
                         "format": "diffusers",
@@ -602,7 +659,7 @@ class RestServer:
                         "size_bytes": total_size,
                         "file_path": model_path,
                         "has_warning": False,
-                        "last_known_vram_mb": 6000
+                        "last_known_vram_mb": 8000
                     })
 
         # 5. Scan checkpoints/ directory for Single File models (recursive)
@@ -632,8 +689,8 @@ class RestServer:
                             "size_bytes": file_size,
                             "file_path": model_path,
                             "has_warning": False,
-                            "last_known_vram_mb": 6000
-                        })
+                                    "last_known_vram_mb": 6000
+                                })
         
         return discovered
     def _setup_routes(self):
@@ -664,7 +721,16 @@ class RestServer:
                     "device": device,
                     "gpus": gpus,
                     "environment": env,
-                    "loaded_models": loaded_models
+                    "loaded_models": loaded_models,
+                    "cpu_details": {
+                        "usage": cpu,
+                        "cores": psutil.cpu_count(logical=True)
+                    },
+                    "memory_details": {
+                        "used_gb": psutil.virtual_memory().used / (1024**3),
+                        "total_gb": psutil.virtual_memory().total / (1024**3),
+                        "percent": memory
+                    }
                 }
             except Exception as e:
                 print(f"Error collecting metrics: {e}")
@@ -821,6 +887,126 @@ class RestServer:
                 print(f"[Zombie Killer] Auto-free VRAM: {'ENABLED' if enabled else 'DISABLED'} (interval: {interval}s)")
                 return {"enabled": enabled, "interval": interval}
             except Exception as e:
+                return {"error": str(e)}
+
+        @self.app.get("/v1/models")
+        async def list_models():
+            """List all available models"""
+            discovered = self._discover_models_from_directories()
+            return {"data": discovered}
+
+        @self.app.post("/v1/tools/convert")
+        async def convert_model(request: Request):
+            """
+            Convert a Diffusers model to a single .safetensors file.
+            Streams output logs.
+            """
+            import os
+            import json
+            from fastapi.responses import JSONResponse, StreamingResponse
+            
+            try:
+                data = await request.json()
+                model_id = data.get("model_id")
+                fp16 = data.get("fp16", True)
+
+                if not model_id:
+                     return JSONResponse(content={"error": "model_id is required"}, status_code=400)
+
+                # Resolve model path
+                # We can reuse discovery or manual resolution.
+                # Discovery is safer as it gives us the real path.
+                discovered = self._discover_models_from_directories()
+                target_model = next((m for m in discovered if m["id"] == model_id), None)
+                
+                if not target_model:
+                     return JSONResponse(content={"error": f"Model {model_id} not found"}, status_code=404)
+                
+                model_path = target_model["file_path"]
+                
+                # Determine script path
+                script_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "scripts", "convert_diffusers_to_safetensors.py")
+                if not os.path.exists(script_path):
+                     return JSONResponse(content={"error": f"Conversion script not found at {script_path}"}, status_code=500)
+
+                # Determine output path (sibling to the folder, but with .safetensors)
+                # The script handles this logic too, but we need to pass a dummy output path to satisfy the arg parser
+                # providing a directory as output_path might trigger the specific "clean name" logic in the script?
+                # The script takes --output_path as the FULL file path.
+                # Let's derive a reasonable one here to pass to it.
+                model_dirname = os.path.dirname(model_path) # e.g. .../models/diffusers
+                model_basename = os.path.basename(model_path) # e.g. albedobase-xl
+                output_filename = f"{model_basename}.safetensors"
+                output_path = os.path.join(model_dirname, output_filename)
+
+                # Build command
+                cmd = [
+                    "python3", 
+                    "-u", # Unbuffered output
+                    script_path,
+                    "--model_path", model_path,
+                    "--output_path", output_path
+                ]
+                
+                if fp16:
+                    cmd.append("--fp16")
+
+                print(f"[Conversion] Running: {' '.join(cmd)}")
+
+                async def generate_output():
+                    import subprocess
+                    process = subprocess.Popen(
+                        cmd,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.STDOUT, # Merge stderr into stdout
+                        text=True,
+                        bufsize=1 # Line buffered
+                    )
+                    
+                    yield f"data: {json.dumps({'message': f'Starting conversion for {model_id}...'})}\n\n"
+                    yield f"data: {json.dumps({'message': f'Input: {model_path}'})}\n\n"
+                    yield f"data: {json.dumps({'message': f'Output: {output_path}'})}\n\n"
+
+                    # Read stdout line by line
+                    for line in iter(process.stdout.readline, ''):
+                        if line:
+                            yield f"data: {json.dumps({'message': line.strip()})}\n\n"
+                    
+                    process.stdout.close()
+                    return_code = process.wait()
+                    
+                    if return_code == 0:
+                        yield f"data: {json.dumps({'message': 'Conversion completed successfully!', 'type': 'success'})}\n\n"
+                        yield f"data: {json.dumps({'completed': True, 'success': True})}\n\n"
+                    else:
+                        yield f"data: {json.dumps({'message': f'Conversion failed with exit code {return_code}', 'type': 'error'})}\n\n"
+                        yield f"data: {json.dumps({'completed': True, 'success': False})}\n\n"
+
+                return StreamingResponse(generate_output(), media_type="text/event-stream")
+
+            except Exception as e:
+                import traceback
+                traceback.print_exc()
+                return JSONResponse(content={"error": str(e)}, status_code=500)
+
+        @self.app.get("/v1/system/dev-mode")
+        async def get_dev_mode():
+            """Get Dev Mode status"""
+            enabled = self.config.get("dev_mode", False)
+            return {"enabled": enabled}
+
+        @self.app.post("/v1/system/dev-mode")
+        async def set_dev_mode(request: Request):
+            """Toggle Dev Mode"""
+            try:
+                data = await request.json()
+                if "enabled" in data:
+                    self.config.set("dev_mode", bool(data["enabled"]))
+                
+                enabled = self.config.get("dev_mode", False)
+                return {"enabled": enabled}
+            except Exception as e:
+                return {"error": str(e)}
                 raise HTTPException(status_code=500, detail=str(e))
 
         @self.app.get("/v1/system/backend-version")
@@ -1438,9 +1624,12 @@ class RestServer:
                             repo_name = parts[1]
                             hf_folder = f"models--{user_name}--{repo_name}"
                             
-                            # Determine models directory (Go up 4 levels to .moondream-station root)
-                            base_models_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(__file__)))), 'models', 'models')
-                            expected_path = os.path.join(base_models_dir, hf_folder, "snapshots")
+                            # Determine models directory from config
+                            models_dir = self.config.get("models_dir")
+                            # The 'models' subdirectory inside the main models dir stores HF cache
+                            hf_models_dir = os.path.join(models_dir, "models")
+                            
+                            expected_path = os.path.join(hf_models_dir, hf_folder, "snapshots")
                             
                             if os.path.exists(expected_path):
                                 # Find latest snapshot (hash folder)
@@ -1460,8 +1649,8 @@ class RestServer:
                     if not found and target_model_id.startswith("checkpoint/"):
                         # Extract filename part
                         filename_part = target_model_id.replace("checkpoint/", "")
-                        # Go up 4 levels to .moondream-station root
-                        models_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(__file__)))), 'models', 'checkpoints')
+                        # Use config models dir
+                        models_dir = os.path.join(self.config.get("models_dir"), "checkpoints")
                         
                         # Try common extensions
                         for ext in [".safetensors", ".ckpt", ".bin", ".pt"]:

@@ -54,6 +54,7 @@ class ConfigManager:
             "inference_max_queue_size": INFERENCE_MAX_QUEUE_SIZE,
             "inference_timeout": INFERENCE_TIMEOUT,
             "logging": True,
+            "dev_mode": False,
         }
 
     def _save_config(self):
