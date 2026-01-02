@@ -415,7 +415,7 @@ model_memory_tracker.record_baseline()
 
 from threading import Thread
 from typing import Any, Dict
-from fastapi import FastAPI, Request, HTTPException
+from fastapi import FastAPI, Request, Response, HTTPException
 from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -437,6 +437,7 @@ class RestServer:
             allow_credentials=True,
             allow_methods=["*"],
             allow_headers=["*"],
+            expose_headers=["X-VRAM-Used", "X-VRAM-Total"],  # CRITICAL: Expose VRAM headers for frontend polling
         )
         self.server = None
         self.server_thread = None
@@ -1759,7 +1760,7 @@ class RestServer:
 
 
         @self.app.get("/v1/models")
-        async def list_models():
+        async def list_models(response: Response = None):
             try:
                 all_models = []
                 
@@ -1801,6 +1802,26 @@ class RestServer:
                 discovered = self._discover_models_from_directories()
                 all_models.extend(discovered)
                 
+                # ADD VRAM HEADERS for frontend polling
+                if response:
+                    try:
+                        print("[VRAM Headers] Attempting to get GPU info from hw_monitor...")
+                        gpus = hw_monitor.get_gpus()
+                        print(f"[VRAM Headers] hw_monitor.get_gpus() returned: {gpus}")
+                        if gpus and len(gpus) > 0:
+                            vram_used = gpus[0].get("memory_used", 0)
+                            vram_total = gpus[0].get("memory_total", 0)
+                            print(f"[VRAM Headers] Setting headers - Used: {vram_used}, Total: {vram_total}")
+                            response.headers["X-VRAM-Used"] = str(vram_used)
+                            response.headers["X-VRAM-Total"] = str(vram_total)
+                            print(f"[VRAM Headers] Headers set successfully")
+                        else:
+                            print("[VRAM Headers] WARNING: No GPUs returned by hw_monitor")
+                    except Exception as e:
+                        print(f"[VRAM Headers] ERROR: {type(e).__name__}: {e}")
+                        import traceback
+                        traceback.print_exc()
+                
                 return {"models": all_models}
             except Exception as e:
                 import traceback
@@ -1808,13 +1829,13 @@ class RestServer:
                 raise HTTPException(status_code=500, detail=str(e))
 
         @self.app.post("/v1/models/refresh")
-        async def refresh_models():
+        async def refresh_models(response: Response = None):
             """
             Refresh the model list by re-scanning directories.
             Returns the updated model list.
             """
             try:
-                return await list_models()
+                return await list_models(response)
             except Exception as e:
                 import traceback
                 traceback.print_exc()
@@ -1881,8 +1902,8 @@ class RestServer:
                 raise HTTPException(status_code=500, detail="Failed to switch model")
 
         @self.app.post("/v1/chat/completions")
-        async def chat_completions(request: Request):
-            return await self._handle_chat_completion(request)
+        async def chat_completions(request: Request, response: Response):
+            return await self._handle_chat_completion(request, response)
 
         @self.app.api_route(
             "/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH"]
@@ -1892,8 +1913,13 @@ class RestServer:
 
 
 
-    async def _handle_chat_completion(self, request: Request):
+    async def _handle_chat_completion(self, request: Request, response: Response = None):
         # NOTE: Removed initial is_running check to allow auto-start
+        
+        # Defensively initialize variables used in error handling/cleanup
+        vram_mode = "balanced"
+        function_name = "unknown"
+        kwargs = {}
 
         try:
             body = await request.json()
@@ -2005,7 +2031,6 @@ class RestServer:
                 raise HTTPException(status_code=400, detail="Image required for Moondream")
 
             # --- SMART VRAM MANAGEMENT START ---
-            # --- SMART VRAM MANAGEMENT START ---
             vram_mode = request.headers.get("X-VRAM-Mode", "balanced")
             if vram_mode in ["balanced", "low"]:
                 # Ensure SDXL is unloaded to free space for Moondream
@@ -2067,6 +2092,24 @@ class RestServer:
                     response_text = json.dumps(result)
             else:
                 response_text = str(result)
+
+            # --- ADD RESPONSE HEADERS ---
+            if response:
+                try:
+                    # Set standard headers
+                    response.headers["X-Inference-Time"] = str((time.time() - start_time) * 1000)
+                    
+                    # Set VRAM headers
+                    # Use global hw_monitor if available
+                    if 'hw_monitor' in globals() and hw_monitor:
+                         gpus = hw_monitor.get_gpus()
+                         if gpus and len(gpus) > 0:
+                            vram_used = gpus[0].get("memory_used", 0)
+                            vram_total = gpus[0].get("memory_total", 0)
+                            response.headers["X-VRAM-Used"] = str(vram_used)
+                            response.headers["X-VRAM-Total"] = str(vram_total)
+                except Exception as e:
+                    print(f"Warning: Failed to set response headers: {e}")
 
             return {
                 "id": f"chatcmpl-{int(time.time())}",

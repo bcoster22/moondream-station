@@ -44,6 +44,7 @@
 - **Visual Reasoning**: Caption images, answer questions, and detect objects.
 - **NSFW Detection**: Securely identify inappropriate content on-device.
 - **GPU Recovery**: Advanced tools to reset NVIDIA GPUs after driver crashes.
+- **VRAM Analytics**: Real-time memory reporting and adaptive scaling headers.
 - **Cross-Platform**: Runs on Linux and Windows (WSL recommended).
 
 ## Installation
