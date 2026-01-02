@@ -73,8 +73,39 @@ def main():
             while True:
                 time.sleep(1)
         else:
-            logger.error("Failed to start service.")
-            sys.exit(1)
+            logger.error(f"Failed to start service with model {model_name}.")
+            
+            # Fallback to Safe Mode
+            fallback_model = "moondream-2"
+            if model_name != fallback_model:
+                logger.info(f"Attempting fallback to safe model: {fallback_model}")
+                # Reset worker pool if partially started
+                try: service.stop() 
+                except: pass
+                
+                if service.start(fallback_model):
+                    # Update config to match reality
+                    config.set("current_model", fallback_model)
+                    
+                    port = config.get("service_port", 2020)
+                    logger.info(f"Service started (Fallback Mode) on port {port}")
+                    
+                    # Handle graceful shutdown (Duplicate of above, could be refactored but inline is fine for now)
+                    def signal_handler(sig, frame):
+                        logger.info("Stopping service...")
+                        service.stop()
+                        sys.exit(0)
+                        
+                    signal.signal(signal.SIGINT, signal_handler)
+                    signal.signal(signal.SIGTERM, signal_handler)
+                    
+                    while True:
+                        time.sleep(1)
+                else:
+                    logger.critical("Fatal: Even fallback model failed to start.")
+                    sys.exit(1)
+            else:
+                sys.exit(1)
             
     except Exception as e:
         logger.error(f"Fatal error: {e}")

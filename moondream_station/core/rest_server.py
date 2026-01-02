@@ -1562,6 +1562,7 @@ class RestServer:
                 traceback.print_exc()
                 return JSONResponse(content={"error": str(e)}, status_code=500)
 
+        @self.app.post("/v1/images/generations")
         @self.app.post("/v1/generate")
         async def generate_image(request: Request):
             """
@@ -1993,17 +1994,18 @@ class RestServer:
                 raise HTTPException(status_code=400, detail="Image required for Moondream")
 
             # --- SMART VRAM MANAGEMENT START ---
+            # --- SMART VRAM MANAGEMENT START ---
             vram_mode = request.headers.get("X-VRAM-Mode", "balanced")
             if vram_mode in ["balanced", "low"]:
                 # Ensure SDXL is unloaded to free space for Moondream
-                if 'sdxl_backend_new' in sys.modules:
+                # Use global variable directly - it is NOT in sys.modules with this name
+                if sdxl_backend_new:
                     try:
-                        # Only unload if it looks like it might be loaded (backend instance exists)
-                        # But our unload_backend check is safe
                         print(f"DEBUG: Smart Switching (Mode: {vram_mode}) - Unloading SDXL before analysis...")
-                        sys.modules['sdxl_backend_new'].unload_backend()
+                        sdxl_backend_new.unload_backend()
                     except Exception as e:
                         print(f"WARNING: Failed to unload SDXL: {e}")
+            # --- SMART VRAM MANAGEMENT END ---
             # --- SMART VRAM MANAGEMENT END ---
 
             # Execute with OOM Retry
@@ -2129,33 +2131,38 @@ class RestServer:
         current_model = self.config.get("current_model")
 
         if requested_model and requested_model != current_model:
-            if requested_model in self.manifest_manager.get_models():
-                print(f"Auto-switching to requested model: {requested_model}")
-                # Capture previous model for tracking unloading BEFORE switch
-                previous_model_auto = self.config.get("current_model")
+            # Allow dynamic models (e.g. HF IDs) to be passed through even if not in manifest
+            # if requested_model in self.manifest_manager.get_models():
+            print(f"Auto-switching to requested model: {requested_model}")
+            # Capture previous model for tracking unloading BEFORE switch
+            previous_model_auto = self.config.get("current_model")
+            
+            if self.inference_service.start(requested_model):
+                self.config.set("current_model", requested_model)
+                current_model = requested_model
                 
-                if self.inference_service.start(requested_model):
-                    self.config.set("current_model", requested_model)
-                    current_model = requested_model
-                    
-                    # SYSTEM INTEGRATION: Track model switch in memory tracker
-                    try:
-                        # 1. Unload previous
-                        if previous_model_auto and previous_model_auto != requested_model:
-                            model_memory_tracker.track_model_unload(previous_model_auto)
-                            print(f"[Tracker] Unloaded previous model on auto-switch: {previous_model_auto}")
-                            
-                        # 2. Load new
-                        model_info = self.manifest_manager.get_models().get(requested_model)
-                        if model_info:
-                            model_memory_tracker.track_model_load(requested_model, model_info.name)
-                            print(f"[Tracker] Tracked new model on auto-switch: {requested_model}")
-                    except Exception as e:
-                        print(f"[Tracker] Warning: Failed to track auto-switch: {e}")
-                else:
-                    raise HTTPException(status_code=500, detail=f"Failed to switch to model {requested_model}")
+                # SYSTEM INTEGRATION: Track model switch in memory tracker
+                try:
+                    # 1. Unload previous
+                    if previous_model_auto and previous_model_auto != requested_model:
+                        model_memory_tracker.track_model_unload(previous_model_auto)
+                        print(f"[Tracker] Unloaded previous model on auto-switch: {previous_model_auto}")
+                        
+                    # 2. Load new
+                    model_info = self.manifest_manager.get_models().get(requested_model)
+                    if model_info:
+                        model_memory_tracker.track_model_load(requested_model, model_info.name)
+                        print(f"[Tracker] Tracked new model on auto-switch: {requested_model}")
+                    else:
+                        # Dynamic model - try to track with basic info
+                        model_memory_tracker.track_model_load(requested_model, requested_model)
+                except Exception as e:
+                    print(f"[Tracker] Warning: Failed to track auto-switch: {e}")
             else:
-                raise HTTPException(status_code=404, detail=f"Model {requested_model} not found")
+                # If start() returns False, it really logic failed
+                raise HTTPException(status_code=500, detail=f"Failed to switch to model {requested_model}")
+            # else:
+            #    raise HTTPException(status_code=404, detail=f"Model {requested_model} not found")
 
         timeout = kwargs.pop("timeout", None)
         if timeout:
