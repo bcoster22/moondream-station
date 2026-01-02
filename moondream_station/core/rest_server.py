@@ -1733,13 +1733,24 @@ class RestServer:
                     print("[VRAM] Low mode: Unloading SDXL after generation.")
                     sdxl_backend_new.unload_backend()
 
-                return {
+                # Prepare Headers
+                headers = {}
+                try:
+                    gpus = hw_monitor.get_gpus()
+                    if gpus:
+                        headers["X-VRAM-Used"] = str(gpus[0]["memory_used"]) 
+                        headers["X-VRAM-Total"] = str(gpus[0]["memory_total"])
+                except: pass
+
+                content = {
                     "created": int(time.time()), 
                     "data": [{"b64_json": img} for img in generated_images], 
                     "images": generated_images, 
                     "image": generated_images[0] if generated_images else None,
                     "stats": stats
                 }
+                
+                return JSONResponse(content=content, headers=headers)
 
             except Exception as e:
                 import traceback
@@ -2197,7 +2208,8 @@ class RestServer:
             # --- PATCH: Auto-Unload Logic ---
             # Check for header or env var to unload model after inference
             should_unload = request.headers.get("X-Auto-Unload") == "true" or \
-                            os.environ.get("MOONDREAM_AUTO_UNLOAD") == "true"
+                            os.environ.get("MOONDREAM_AUTO_UNLOAD") == "true" or \
+                            vram_mode == "low"
             
             if should_unload:
                 print(f"[System] Auto-unloading model (Reason: Auto-Unload requested)")
@@ -2324,7 +2336,15 @@ class RestServer:
                     model=self.config.get("current_model")
                 )
 
-        return JSONResponse(result)
+            headers = {}
+            try:
+                gpus = hw_monitor.get_gpus()
+                if gpus:
+                    headers["X-VRAM-Used"] = str(gpus[0]["memory_used"])
+                    headers["X-VRAM-Total"] = str(gpus[0]["memory_total"])
+            except: pass
+
+            return JSONResponse(result, headers=headers)
 
     def _extract_function_name(self, path: str) -> str:
         path_parts = [p for p in path.split("/") if p]
