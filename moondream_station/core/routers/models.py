@@ -1,11 +1,16 @@
 from fastapi import APIRouter, Request, Response, HTTPException
 import os
 import glob
+import time
 from pathlib import Path
 from ..hardware_monitor import hw_monitor, model_memory_tracker
 from ..sdxl_wrapper import sdxl_backend_new
 
 router = APIRouter()
+
+# Cache for model discovery to prevent excessive filesystem scans
+_model_cache = {"models": None, "timestamp": 0}
+CACHE_DURATION = 60  # Cache for 60 seconds
 
 def discover_models_from_directories(config):
     """
@@ -19,7 +24,8 @@ def discover_models_from_directories(config):
     if not models_dir:
             models_dir = os.environ.get("MOONDREAM_MODELS_DIR", os.path.expanduser("~/.moondream-station/models"))
     
-    print(f"DEBUG: Discovering models in {models_dir}")
+    # Note: Discovery is cached for 60 seconds in list_models()
+    # Only runs when cache expires or on manual refresh
 
     
     # Helper function to categorize models by directory and name
@@ -237,6 +243,28 @@ async def list_models(request: Request, response: Response = None):
         manifest_manager = request.app.state.manifest_manager
         config = request.app.state.config
         
+        # Check cache first
+        current_time = time.time()
+        if _model_cache["models"] is not None and (current_time - _model_cache["timestamp"]) < CACHE_DURATION:
+            # Return cached results
+            cached_models = _model_cache["models"]
+            
+            # Still update VRAM headers for current state
+            if response:
+                try:
+                    gpus = hw_monitor.get_gpus()
+                    if gpus and len(gpus) > 0:
+                        vram_used = gpus[0].get("memory_used", 0)
+                        vram_total = gpus[0].get("memory_total", 0)
+                        response.headers["X-VRAM-Used"] = str(vram_used)
+                        response.headers["X-VRAM-Total"] = str(vram_total)
+                except Exception as e:
+                    import traceback
+                    traceback.print_exc()
+            
+            return {"models": cached_models}
+        
+        # Cache miss or expired - do full discovery
         all_models = []
         
         # 1. Manifest Models (Vision/Analysis)
@@ -277,6 +305,10 @@ async def list_models(request: Request, response: Response = None):
         discovered = discover_models_from_directories(config)
         all_models.extend(discovered)
         
+        # Update cache
+        _model_cache["models"] = all_models
+        _model_cache["timestamp"] = current_time
+        
         # ADD VRAM HEADERS for frontend polling
         if response:
             try:
@@ -303,6 +335,10 @@ async def refresh_models(request: Request, response: Response = None):
     Returns the updated model list.
     """
     try:
+        # Clear cache to force fresh discovery
+        _model_cache["models"] = None
+        _model_cache["timestamp"] = 0
+        
         return await list_models(request, response)
     except Exception as e:
         import traceback

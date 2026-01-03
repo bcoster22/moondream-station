@@ -301,17 +301,25 @@ async def batch_caption(request: Request):
             img = Image.open(io.BytesIO(raw_bytes)).convert("RGB")
             pil_images.append(img)
 
-        # Execute Batch
-        start_time = time.time()
-        captions = await inference_service.execute_function("caption", image=pil_images)
-        
-        duration = time.time() - start_time
+        try:
+            # Execute Batch
+            start_time = time.time()
+            captions = await inference_service.execute_function("caption", image=pil_images)
+            
+            duration = time.time() - start_time
 
-        return {
-            "captions": captions,
-            "count": len(captions) if isinstance(captions, list) else 1,
-            "duration": round(duration, 3)
-        }
+            return {
+                "captions": captions,
+                "count": len(captions) if isinstance(captions, list) else 1,
+                "duration": round(duration, 3)
+            }
+        finally:
+            # Clean up PIL images to prevent memory leaks
+            for img in pil_images:
+                try:
+                    img.close()
+                except:
+                    pass
 
     except Exception as e:
         import traceback
