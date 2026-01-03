@@ -1,7 +1,7 @@
 import time
 from typing import Optional
-from .rest_server import RestServer
 from .config import SERVICE_PORT, SERVICE_HOST
+from .rest_server import RestServer
 
 
 class ServiceManager:
