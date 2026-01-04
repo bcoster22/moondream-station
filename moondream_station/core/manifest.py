@@ -366,7 +366,7 @@ class ManifestManager:
             traceback.print_exc()
             return None
 
-    def get_backend_for_model(self, model_id: str) -> Optional[Any]:
+    def get_backend_for_model(self, model_id: str, initialize: bool = True) -> Optional[Any]:
         if not self._manifest or model_id not in self._manifest.models:
             return None
 
@@ -375,7 +375,7 @@ class ManifestManager:
         backend = self.load_backend(backend_id)
 
         # Initialize backend with model args if available
-        if backend and model_info.args and hasattr(backend, "init_backend"):
+        if initialize and backend and model_info.args and hasattr(backend, "init_backend"):
             backend.init_backend(**model_info.args)
 
         return backend

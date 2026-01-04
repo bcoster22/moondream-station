@@ -21,7 +21,7 @@ class ServiceManager:
             return False
 
         try:
-            backend = self.manifest_manager.get_backend_for_model(model_name)
+            backend = self.manifest_manager.get_backend_for_model(model_name, initialize=False)
             if not backend:
                 return False
 
