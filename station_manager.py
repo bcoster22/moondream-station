@@ -1,4 +1,4 @@
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, Response, stream_with_context
 from flask_cors import CORS
 import logging
 from datetime import datetime
@@ -10,6 +10,10 @@ import signal
 import threading
 import psutil
 import socket
+import queue
+import re
+import json
+from collections import deque
 
 app = Flask(__name__)
 # Enable CORS for all domains
@@ -20,8 +24,19 @@ log = logging.getLogger('werkzeug')
 log.setLevel(logging.ERROR)
 
 # --- LOGGING SERVICE ---
-logs = []
-MAX_LOGS = 2000
+# Use deque for O(1) append and automatic size limiting
+logs = deque(maxlen=2000)
+MAX_LOGS = 2000  # Keep for reference, but deque handles this automatically
+
+# Streaming queues for connected clients (SSE)
+# Set of Queue objects
+log_queues = set()
+
+# Regex for TQDM progress bars
+# Examples: 
+# 100%|██████████| 20/20 [00:03<00:00,  5.12it/s]
+# Loading pipeline components...:  85%|████████▌ | 6/7 [00:01<00:00,  4.02it/s]
+TQDM_REGEX = re.compile(r'(\d+)%\|.*\| (\d+)/(\d+) \[.*\]')
 
 @app.route('/health', methods=['GET'])
 def health():
@@ -30,6 +45,38 @@ def health():
         "service": "station-manager",
         "backend_status": get_backend_status()
     })
+
+def broadcast_log(entry):
+    """Send log entry to all connected SSE clients"""
+    msg = f"data: {json.dumps(entry)}\n\n"
+    to_remove = set()
+    for q in log_queues:
+        try:
+            q.put_nowait(msg)
+        except queue.Full:
+            to_remove.add(q)
+    
+    for q in to_remove:
+        log_queues.remove(q)
+
+@app.route('/events/logs')
+def stream_logs():
+    """SSE endpoint for real-time log streaming"""
+    def event_stream():
+        q = queue.Queue(maxsize=100)
+        log_queues.add(q)
+        try:
+            # Send initial connected message
+            yield f"data: {json.dumps({'type': 'system', 'message': 'Connected to Station Log Stream'})}\n\n"
+            while True:
+                msg = q.get()
+                yield msg
+        except GeneratorExit:
+            log_queues.remove(q)
+        except Exception:
+            log_queues.remove(q)
+
+    return Response(stream_with_context(event_stream()), mimetype="text/event-stream")
 
 @app.route('/log', methods=['POST'])
 def add_log():
@@ -42,8 +89,9 @@ def add_log():
             entry['timestamp'] = datetime.now().isoformat()
             
         logs.append(entry)
-        if len(logs) > MAX_LOGS:
-            logs.pop(0)
+        
+        # Broadcast to streams
+        broadcast_log(entry)
             
         return jsonify({"status": "logged", "count": len(logs)}), 200
     except Exception as e:
@@ -57,6 +105,8 @@ def get_logs():
 def clear_logs():
     global logs
     logs = []
+    # broadcast clear event
+    broadcast_log({"type": "clear", "message": "Logs cleared"})
     return jsonify({"status": "cleared"}), 200
 
 # --- PROCESS MANAGEMENT ---
@@ -104,6 +154,56 @@ def get_backend_status():
     else:
         return "stopped"
 
+def parse_progress(line):
+    """Extract progress information from console lines"""
+    match = TQDM_REGEX.search(line)
+    if match:
+        percent = int(match.group(1))
+        current = int(match.group(2))
+        total = int(match.group(3))
+        return {
+            "type": "progress",
+            "percent": percent,
+            "current": current,
+            "total": total,
+            "raw": line.strip()
+        }
+    return None
+
+def monitor_output(process):
+    """Read output from process and broadcast it"""
+    try:
+        # Read line by line
+        for line in iter(process.stdout.readline, ''):
+            if not line: break
+            line = line.strip()
+            if not line: continue
+            
+            # Print to our console too
+            print(f"[Backend] {line}")
+            
+            # Create log entry
+            entry = {
+                "timestamp": datetime.now().isoformat(),
+                "level": "INFO", 
+                "message": line,
+                "source": "Backend"
+            }
+            logs.append(entry)
+            if len(logs) > MAX_LOGS:
+                logs.pop(0)
+
+            # Check for progress
+            progress = parse_progress(line)
+            if progress:
+                broadcast_log(progress)
+            
+            # Broadcast raw log
+            broadcast_log(entry)
+            
+    except Exception as e:
+        print(f"[Manager] Error monitoring output: {e}")
+
 def start_backend_process():
     global BACKEND_PROCESS
     
@@ -117,11 +217,20 @@ def start_backend_process():
         cwd = os.path.dirname(os.path.abspath(__file__))
         script_path = os.path.join(cwd, BACKEND_SCRIPT)
         
-        # Spawn process
+        # Spawn process with pipes
         BACKEND_PROCESS = subprocess.Popen(
             [python_exe, script_path],
-            cwd=cwd
+            cwd=cwd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT, # Merge stderr into stdout
+            text=True,
+            bufsize=1 # Line buffered
         )
+        
+        # Start monitoring thread
+        t = threading.Thread(target=monitor_output, args=(BACKEND_PROCESS,), daemon=True)
+        t.start()
+        
         _log_internal("INFO", f"Backend process started (PID: {BACKEND_PROCESS.pid})")
         return True, "Started"
     except Exception as e:
@@ -162,15 +271,16 @@ def stop_backend_process():
 def _log_internal(level, message):
     """Helper to log internal events to the in-memory store"""
     try:
-        logs.append({
+        entry = {
             "timestamp": datetime.now().isoformat(),
             "level": level,
             "message": message,
             "source": "StationManager"
-        })
-        # Keep log size in check
-        if len(logs) > MAX_LOGS:
-            logs.pop(0)
+        }
+        logs.append(entry)
+            
+        # Broadcast
+        broadcast_log(entry)
     except:
         pass
 
@@ -250,12 +360,7 @@ def monitor_memory_loop():
                     msg = f"[Monitor] CRITICAL: Backend using {percent_used:.1f}% of System RAM ({rss_mb:.0f}MB). Restarting..."
                     print(msg)
                     # Log internally
-                    logs.append({
-                        "timestamp": datetime.now().isoformat(),
-                        "level": "ERROR", 
-                        "message": msg,
-                        "source": "StationManager"
-                    })
+                    _log_internal("ERROR", msg)
                     
                     # Restart
                     stop_backend_process()
@@ -283,7 +388,7 @@ if __name__ == '__main__':
     start_backend_process()
     
     try:
-        app.run(host='0.0.0.0', port=3001, debug=False, use_reloader=False)
+        app.run(host='0.0.0.0', port=3001, debug=False, use_reloader=False, threaded=True)
     finally:
         # Cleanup on exit
         stop_backend_process()
