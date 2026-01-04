@@ -199,16 +199,21 @@ def load_pipeline(checkpoint_path, is_directory, config, device="cuda"):
             timestep_spacing="trailing"
         )
         
-        # Try to load VAE
+        # Try to reload VAE with explicit float16 (sometimes helps with artifacts)
+        # But if it fails (e.g. missing VAE folder), just ignore it and use the pipeline's VAE
         try:
-            vae = AutoencoderKL.from_pretrained(
-                model_id,
-                subfolder="vae",
-                torch_dtype=torch.float16
-            )
-            pipeline.vae = vae
+           if is_directory: # Only relevant for Diffusers format
+                logger.info("Attempting to reload VAE in float16...")
+                vae = AutoencoderKL.from_pretrained(
+                    checkpoint_path,
+                    subfolder="vae",
+                    torch_dtype=torch.float16,
+                    local_files_only=True
+                )
+                pipeline.vae = vae
+                logger.info("VAE reloaded successfully.")
         except Exception as e:
-            logger.warning(f"Could not reload VAE: {e}")
+            logger.warning(f"Could not reload VAE (using pipeline default): {e}")
         
         # Enable CPU offload
         pipeline.enable_model_cpu_offload()

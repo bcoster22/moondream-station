@@ -32,6 +32,11 @@ class InferenceService:
             pass
 
     def start(self, model_id: str):
+        # Force unload previous model to free VRAM/RAM
+        if self.current_model and self.current_model != model_id:
+            print(f"[InferenceService] Switching model from {self.current_model} to {model_id}. Unloading previous...")
+            self.unload_model()
+            
         n_workers = int(self.config.get("inference_workers", N_WORKERS))
         max_queue_size = int(
             self.config.get("inference_max_queue_size", MAX_QUEUE_SIZE)
@@ -42,6 +47,10 @@ class InferenceService:
             self.worker_pool.shutdown()
 
         self.manifest_manager.clear_worker_backends()
+        
+        # Double check cleanup
+        import gc
+        gc.collect()
 
         self.current_model = model_id
         self.worker_backends = self.manifest_manager.get_worker_backends(
