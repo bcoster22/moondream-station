@@ -99,7 +99,7 @@ def add_log():
 
 @app.route('/log', methods=['GET'])
 def get_logs():
-    return jsonify(logs)
+    return jsonify(list(logs))  # Convert deque to list for JSON
 
 @app.route('/log/clear', methods=['POST'])
 def clear_logs():
