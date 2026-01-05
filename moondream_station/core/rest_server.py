@@ -186,6 +186,11 @@ class RestServer:
                 # Unload SDXL
                 if sdxl_backend_new:
                      sdxl_backend_new.unload_backend()
+                
+                # Clear CUDA cache and run garbage collection
+                torch.cuda.empty_cache()
+                import gc
+                gc.collect()
 
                 return {"status": "success", "message": "All models unloaded and VRAM cleared"}
             except Exception as e:

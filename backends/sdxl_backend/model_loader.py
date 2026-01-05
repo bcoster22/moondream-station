@@ -200,9 +200,9 @@ def load_pipeline(checkpoint_path, is_directory, config, device="cuda"):
         )
         
         # Try to reload VAE with explicit float16 (sometimes helps with artifacts)
-        # But if it fails (e.g. missing VAE folder), just ignore it and use the pipeline's VAE
+        # If it fails (e.g. missing VAE folder), fallback to models/vae/sdxl_vae.safetensors
         try:
-           if is_directory: # Only relevant for Diffusers format
+            if is_directory:  # Only relevant for Diffusers format
                 logger.info("Attempting to reload VAE in float16...")
                 vae = AutoencoderKL.from_pretrained(
                     checkpoint_path,
@@ -213,7 +213,24 @@ def load_pipeline(checkpoint_path, is_directory, config, device="cuda"):
                 pipeline.vae = vae
                 logger.info("VAE reloaded successfully.")
         except Exception as e:
-            logger.warning(f"Could not reload VAE (using pipeline default): {e}")
+            logger.warning(f"Could not reload model VAE: {e}")
+            # Fallback to models/vae/sdxl_vae.safetensors
+            models_dir = os.environ.get("MOONDREAM_MODELS_DIR", os.path.expanduser("~/.moondream-station/models"))
+            fallback_vae_path = os.path.join(models_dir, "vae", "sdxl_vae.safetensors")
+            
+            if os.path.exists(fallback_vae_path):
+                try:
+                    logger.info(f"Using fallback VAE from {fallback_vae_path}")
+                    vae = AutoencoderKL.from_single_file(
+                        fallback_vae_path,
+                        torch_dtype=torch.float16
+                    )
+                    pipeline.vae = vae
+                    logger.info("Fallback VAE loaded successfully.")
+                except Exception as fallback_error:
+                    logger.warning(f"Fallback VAE also failed (using pipeline default): {fallback_error}")
+            else:
+                logger.warning(f"Fallback VAE not found at {fallback_vae_path}, using pipeline default VAE")
         
         # Enable CPU offload
         pipeline.enable_model_cpu_offload()
